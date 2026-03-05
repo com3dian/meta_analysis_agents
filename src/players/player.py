@@ -11,8 +11,9 @@ it can use to accomplish tasks.
 
 Uses the unified ExecutionContext abstraction for all data access.
 """
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union, Type
 
+from pydantic import BaseModel
 from langchain_core.tools import BaseTool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -86,7 +87,7 @@ class Player:
         context_info: Dict[str, Any],
         workspace: Dict[str, Any],
         inputs: Dict[str, str],
-        target_tables: List[str] = None
+        target_resources: List[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute a specific task using available tools.
@@ -122,21 +123,79 @@ class Player:
         # Build context info section
         is_multi_resource = context_info.get("is_multi_resource", False)
         resources = context_info.get("resources", [])
-        target_tables = target_tables or []
+        target_resources = target_resources or []
+        
+        # Decide once whether this player should behave as a pure labeller.
+        is_labeller = "labeller" in self.name.lower() or "label" in task.lower()
+        
+        # Document content resolution strategy:
+        # - For the labeller, ALWAYS read the full original document from the context.
+        # - For all other players, if a labeled_text artifact exists in the workspace,
+        #   use that as the primary document content instead of re-reading the raw paper.
+        from ..tools.context_tools import get_context
+        document_contents = {}
+        
+        try:
+            # Non-labeller players prefer to consume the labeled text artifact if available.
+            if not is_labeller and "labeled_text" in workspace:
+                labeled_value = workspace["labeled_text"]
+                # Allow either a direct string or a dict wrapper like {"labeled_text": "..."}
+                if isinstance(labeled_value, dict) and "labeled_text" in labeled_value:
+                    labeled_value = labeled_value["labeled_text"]
+                document_contents = {"labeled_text": str(labeled_value)}
+            else:
+                # Fall back to reading from the ExecutionContext.
+                actual_context = get_context(context_key)
+                
+                # Determine which resources to read
+                resources_to_read = target_resources if target_resources else resources
+                if not resources_to_read and actual_context.primary_resource:
+                    resources_to_read = [actual_context.primary_resource]
+                
+                for resource in resources_to_read:
+                    try:
+                        content = actual_context.read_resource(resource)
+                        if isinstance(content, str):
+                            document_contents[resource] = content
+                        elif isinstance(content, list):
+                            document_contents[resource] = "\n\n".join(content)
+                        else:
+                            document_contents[resource] = str(content)
+                    except Exception as e:
+                        document_contents[resource] = f"[Error reading resource: {str(e)}]"
+        except Exception as e:
+            document_contents = {"error": f"Could not access context: {str(e)}"}
         
         if is_multi_resource:
             ctx_info = f"Multi-resource Context: {context_info.get('name', 'context')}\n"
             ctx_info += f"Context type: {context_info.get('context_type', 'unknown')}\n"
             ctx_info += f"Resources: {', '.join(resources)}\n"
-            if target_tables:
-                ctx_info += f"Target resources for this step: {', '.join(target_tables)}\n"
-            ctx_info += f"\nTo use tools, pass context_key='{context_key}'"
+            if target_resources:
+                ctx_info += f"Target resources for this step: {', '.join(target_resources)}\n"
         else:
             resource_name = resources[0] if resources else "unknown"
             ctx_info = f"Context: {context_info.get('name', 'context')}\n"
             ctx_info += f"Context type: {context_info.get('context_type', 'unknown')}\n"
             ctx_info += f"Resource: {resource_name}\n"
-            ctx_info += f"\nTo use tools, pass context_key='{context_key}'"
+        
+        # Build document content section
+        document_content_section = "\n\n--- Document Content ---\n"
+        if len(document_contents) == 1:
+            resource_name = list(document_contents.keys())[0]
+            content = list(document_contents.values())[0]
+            document_content_section += f"Content from '{resource_name}':\n\n{content}"
+        else:
+            for resource_name, content in document_contents.items():
+                document_content_section += f"\n--- Content from '{resource_name}' ---\n{content}\n"
+        
+        # Adjust system message for labeller to avoid encouraging analysis/summarization
+        system_task_instruction = (
+            "Your task is to add XML tags to the original document text exactly as provided. "
+            "Return the complete original text with tags inserted - do NOT analyze, summarize, or restructure."
+            if is_labeller
+            else "Your task is to analyze the context and provide a detailed response.\n"
+                 "When you need to use a tool, describe what you would do and provide your analysis."
+        )
         
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""You are {self.name}. {self.role_prompt}
@@ -144,8 +203,7 @@ class Player:
 You have access to the following tools:
 {tool_descriptions}
 
-Your task is to analyze the context and provide a detailed response.
-When you need to use a tool, describe what you would do and provide your analysis.
+{system_task_instruction}
 
 {ctx_info}
 
@@ -156,20 +214,28 @@ For multi-resource contexts (e.g. multiple tables), consider:
 """),
             ("human", """Task: {task}
 
-Target tables for this step: {target_tables}
+Target resources for this step: {target_tables}
+
+{document_content}
 
 Input context from previous steps:
 {input_context}
 
-Execute this task and provide a comprehensive response. Include:
-1. Your approach to the task
-2. Any relevant observations or findings
-3. The result of your analysis""")
+Execute this task and provide your output.""")
         ])
         
-        input_context = "\n".join([
-            f"- {k}: {v}" for k, v in resolved_inputs.items()
-        ]) if resolved_inputs else "No inputs from previous steps."
+        # Build input context strictly from the artifacts the planner chose to wire
+        # into this step via `inputs`. This gives the planner full control over what
+        # each player can see from previous steps or from initial artifacts.
+        input_context_parts = []
+        if resolved_inputs:
+            for k, v in resolved_inputs.items():
+                input_context_parts.append(f"- {k}: {v}")
+        
+        input_context = "\n".join(input_context_parts) if input_context_parts else "No inputs from previous steps."
+        
+        # No extra schema or objective text is injected automatically here; the planner
+        # must explicitly include those artifacts in `inputs` if a step should see them.
         
         # Execute with LLM
         chain = prompt | self.llm | self._output_parser
@@ -177,17 +243,41 @@ Execute this task and provide a comprehensive response. Include:
         # Actually invoke tools if available
         tool_results = {}
         
-        # Invoke tools with context_key
+        # Invoke tools with context_key (and additional parameters when needed)
         for tool in self.tools:
             tool_name = tool.name.lower()
             try:
-                # Determine which tables to analyze
-                if target_tables:
-                    resources_to_analyze = target_tables
+                # Determine which resources to analyze
+                if target_resources:
+                    resources_to_analyze = target_resources
                 else:
                     resources_to_analyze = resources
                 
-                # Check if tool needs table parameter
+                # Special handling for XML tagging tool: it needs field_value_pairs
+                if "xml_tag_from_field_values" in tool_name:
+                    field_value_pairs = workspace.get("field_value_pairs", [])
+                    if not field_value_pairs:
+                        tool_results[tool.name] = "Error: 'field_value_pairs' artifact not found in workspace."
+                        continue
+                    
+                    # Run on the relevant resources (usually the primary document)
+                    for resource in resources_to_analyze or [resources[0] if resources else ""]:
+                        if not resource:
+                            continue
+                        try:
+                            result = tool.invoke(
+                                {
+                                    "context_key": context_key,
+                                    "resource": resource,
+                                    "field_value_pairs": field_value_pairs,
+                                }
+                            )
+                            tool_results[f"{resource}:{tool.name}"] = result
+                        except Exception as e:
+                            tool_results[f"{resource}:{tool.name}"] = f"Error: {str(e)}"
+                    continue
+                
+                # Generic resource-specific tools
                 if any(
                     kw in tool_name
                     for kw in [
@@ -225,14 +315,30 @@ Execute this task and provide a comprehensive response. Include:
                 tool_results[tool.name] = f"Error: {str(e)}"
         
         # Get LLM analysis
-        target_info = ", ".join(target_tables) if target_tables else (
+        target_info = ", ".join(target_resources) if target_resources else (
             "All resources" if is_multi_resource else "N/A"
         )
-        llm_response = chain.invoke({
-            "task": task,
-            "target_tables": target_info,
-            "input_context": input_context + "\n\nTool Results:\n" + str(tool_results)
-        })
+        
+        # For labeller, if XML tagging tool produced a tagged document, prefer that
+        # deterministic output over an LLM-generated one.
+        is_labeller = "labeller" in self.name.lower() or "label" in task.lower()
+        tagged_result = None
+        if is_labeller:
+            # Prefer first non-error result from the XML tagging tool
+            for key, value in tool_results.items():
+                if "xml_tag_from_field_values" in key and isinstance(value, str) and not value.startswith("Error:"):
+                    tagged_result = value
+                    break
+        
+        if tagged_result is not None:
+            llm_response = tagged_result
+        else:
+            llm_response = chain.invoke({
+                "task": task,
+                "target_tables": target_info,
+                "document_content": document_content_section,
+                "input_context": input_context + "\n\nTool Results:\n" + str(tool_results)
+            })
         
         return {
             "player": self.name,
@@ -390,8 +496,9 @@ while maintaining accuracy and your analytical perspective.""")
     def synthesize_results(
         self,
         task: str,
-        all_results: List[Dict[str, Any]]
-    ) -> str:
+        all_results: List[Dict[str, Any]],
+        output_schema: Optional[Type[BaseModel]] = None
+    ) -> Union[str, BaseModel]:
         """
         Synthesize multiple results into a consolidated output.
         Uses this player's role/expertise to consolidate debate results.
@@ -399,10 +506,27 @@ while maintaining accuracy and your analytical perspective.""")
         Args:
             task: The task that was worked on
             all_results: List of results from all players
+            output_schema: Optional Pydantic model class for structured output.
+                          If provided, returns a validated Pydantic model instance.
+                          If None, returns a string (legacy behavior).
             
         Returns:
-            Synthesized result as a string
+            Synthesized result as a string or Pydantic model instance
         """
+        results_str = "\n\n".join([
+            f"=== {r.get('player', 'Unknown')} ===\n{r.get('analysis', str(r))}"
+            for r in all_results
+        ])
+        
+        if output_schema is not None:
+            # Use structured output with Pydantic schema
+            return self._synthesize_structured(task, results_str, output_schema)
+        else:
+            # Legacy string output
+            return self._synthesize_string(task, results_str)
+    
+    def _synthesize_string(self, task: str, results_str: str) -> str:
+        """Synthesize results as a string (legacy behavior)."""
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""You are {self.name}. {self.role_prompt}
 
@@ -429,10 +553,48 @@ Provide the consolidated result for this task. Output only the result, no commen
         
         chain = prompt | self.llm | self._output_parser
         
-        results_str = "\n\n".join([
-            f"=== {r.get('player', 'Unknown')} ===\n{r.get('analysis', str(r))}"
-            for r in all_results
+        return chain.invoke({
+            "task": task,
+            "all_results": results_str
+        })
+    
+    def _synthesize_structured(
+        self, 
+        task: str, 
+        results_str: str, 
+        output_schema: Type[BaseModel]
+    ) -> BaseModel:
+        """
+        Synthesize results into a structured Pydantic model.
+        
+        Uses LangChain's with_structured_output() for guaranteed schema compliance.
+        """
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", f"""You are {self.name}. {self.role_prompt}
+
+You are synthesizing results from multiple analysts into a structured format.
+
+**Your job:**
+- Extract and consolidate all relevant information from the analyses
+- Fill in ALL fields in the schema with concrete values from the gathered information
+- Use null/None for fields where information is truly unavailable
+- Resolve conflicts by choosing the most accurate/complete information
+
+**CRITICAL:**
+- Output MUST conform exactly to the provided schema
+- Use actual values, not placeholders like "..." 
+- Be specific and concrete"""),
+            ("human", """Task: {task}
+
+Results from all analysts:
+{all_results}
+
+Generate the final structured output.""")
         ])
+        
+        # Use with_structured_output for guaranteed schema compliance
+        structured_llm = self.llm.with_structured_output(output_schema)
+        chain = prompt | structured_llm
         
         return chain.invoke({
             "task": task,

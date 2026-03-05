@@ -18,13 +18,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterator, List, Optional, Union
 
-import pandas as pd
-
 
 class ContextType(str, Enum):
     """Enumeration of supported execution context types."""
 
     CSV = "csv"
+    TEXT = "text"
+    PDF = "pdf"
     PARQUET = "parquet"
     JSON = "json"
     SQLITE = "sqlite"
@@ -152,15 +152,20 @@ class ExecutionContext(ABC):
         fields: Optional[List[str]] = None,
         limit: Optional[int] = None,
         **kwargs,
-    ) -> pd.DataFrame:
-        """Read a resource into a pandas DataFrame."""
-        pass
+    ) -> Any:
+        """
+        Read a resource into an in-memory object.
 
+        Concrete implementations may return any convenient structure
+        (e.g., pandas DataFrame, list of dicts, raw text, etc.).
+        """
+        pass
+    
     @abstractmethod
     def iter_resource(
         self, resource: str, chunksize: int = 10000, **kwargs
-    ) -> Iterator[pd.DataFrame]:
-        """Iterate over a resource in chunks."""
+    ) -> Iterator[Any]:
+        """Iterate over a resource in chunks (type defined by implementation)."""
         pass
 
     @property
@@ -215,15 +220,6 @@ class ExecutionContext(ABC):
 
     def _discover_relationships(self) -> List[RelationshipInfo]:
         return []
-
-    def get_field_values(
-        self, resource: str, field: str, limit: Optional[int] = None
-    ) -> List[Any]:
-        df = self.read_resource(resource, fields=[field])
-        values = df[field].dropna().unique().tolist()
-        if limit:
-            return values[:limit]
-        return values
 
     def validate(self) -> bool:
         if not self.resources:

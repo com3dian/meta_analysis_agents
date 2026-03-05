@@ -37,6 +37,10 @@ class Task(BaseModel):
         default_factory=list,
         description="A list of new artifact names that this step will produce and save to the workspace.",
     )
+    objective_sections: List[str] = Field(
+        default_factory=list,
+        description="Optional: List of objective section names this step should see. If empty, the step sees the full objective. Sections like 'labeling', 'extraction', 'validation' can be used to filter the objective.",
+    )
 
 
 class Plan(BaseModel):
@@ -110,7 +114,7 @@ class StepResult(BaseModel):
     debate_rounds_completed: int = Field(
         default=0, description="Number of debate rounds that were completed."
     )
-    consolidated_result: str = Field(
+    consolidated_result: Any = Field(
         default="", description="The synthesized result after debate."
     )
     artifacts: Dict[str, Any] = Field(

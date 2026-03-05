@@ -11,12 +11,15 @@ The execution flow is:
     execute_parallel → critique → revise → [loop or synthesize]
 """
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Type
+
+from pydantic import BaseModel
 
 from langgraph.graph import StateGraph, END
 
 from src.core.state import StepExecutionState, PlayerResult, DebateEntry
 from ..players import Player, create_player_from_config, PLAYER_CONFIGS
+from .utils import filter_objective_by_sections, get_labeling_objective
 
 
 # ===================================================================
@@ -201,6 +204,10 @@ def synthesize_node(state: StepExecutionState) -> Dict[str, Any]:
     task = state["task"]
     player_results = state["player_results"]
     expected_outputs = state["expected_outputs"]
+    output_schema: Optional[Type[BaseModel]] = state.get("output_schema")
+    
+    if output_schema:
+        logging.info(f"  Using structured output with schema: {output_schema.__name__}")
     
     try:
         results_for_synthesis = [
@@ -212,16 +219,40 @@ def synthesize_node(state: StepExecutionState) -> Dict[str, Any]:
             for r in player_results
         ]
         
+        # Include schema from workspace if available for synthesis
+        workspace = state.get("workspace", {})
+        if "meta_analytic_schema" in workspace:
+            schema_content = workspace["meta_analytic_schema"]
+            # Add schema as a special entry in results for synthesis
+            results_for_synthesis.insert(0, {
+                "player": "schema_reference",
+                "analysis": f"**META-ANALYTIC SCHEMA (CRITICAL - USE THESE EXACT FIELD NAMES):**\n{schema_content}\n\n**IMPORTANT**: All meta-analytic records MUST use exactly these field names. Do NOT invent new field names.",
+                "tool_results": {}
+            })
+        
         consolidated = synthesizer.synthesize_results(
             task=task,
-            all_results=results_for_synthesis
+            all_results=results_for_synthesis,
+            output_schema=output_schema
         )
+        
+        if output_schema and isinstance(consolidated, BaseModel):
+            artifact_value = consolidated.model_dump(by_alias=True)
+        else:
+            artifact_value = consolidated
         
         produced_artifacts = {}
         for output_name in expected_outputs:
-            produced_artifacts[output_name] = consolidated
+            produced_artifacts[output_name] = artifact_value
         
         logging.info(f"  Synthesis complete. Produced artifacts: {list(produced_artifacts.keys())}")
+        if isinstance(artifact_value, dict):
+            preview = str(artifact_value)[:200].replace('\n', ' ')
+        else:
+            preview = str(artifact_value)[:200].replace('\n', ' ')
+        if len(str(artifact_value)) > 200:
+            preview += "..."
+        logging.info(f"    Synthesized output: {preview}")
         
         return {
             "consolidated_result": consolidated,
@@ -315,11 +346,17 @@ def create_step_state(
     workspace: Dict[str, Any],
     players_per_step: int,
     debate_rounds: int,
-    player_pool: List[str]
+    player_pool: List[str],
+    output_schema: Optional[Type[BaseModel]] = None
 ) -> StepExecutionState:
     """
     Create the initial state for executing a step.
     """
+    # Logical player role for this step (e.g., "labeller", "schema_reasoner").
+    # Stored in the state for logging/metadata; individual Player instances
+    # created below are named with an index suffix (role_1, role_2, ...).
+    player_name = step_dict.get("player", "")
+
     players = []
     for i in range(min(players_per_step, len(player_pool))):
         role_name = player_pool[i % len(player_pool)]
@@ -334,7 +371,7 @@ def create_step_state(
     return StepExecutionState(
         step_index=step_index,
         task=step_dict.get("task", ""),
-        player_name=step_dict.get("player", ""),
+        player_name=player_name,
         rationale=step_dict.get("rationale", ""),
         input_mappings=step_dict.get("inputs", {}),
         expected_outputs=step_dict.get("outputs", []),
@@ -348,6 +385,7 @@ def create_step_state(
         current_debate_round=0,
         player_results=[],
         debate_log=[],
+        output_schema=output_schema,
         consolidated_result=None,
         produced_artifacts={},
         error=None,

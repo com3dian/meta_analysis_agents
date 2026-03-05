@@ -21,7 +21,7 @@ load_dotenv()
 # LLM PROVIDER CONFIGURATION
 # =============================================================================
 
-# LLM Provider: "google", "surf", "openai"
+# LLM Provider: "google", "surf", "openai", "qwen"
 # Can be overridden by environment variable: LLM_PROVIDER
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google")
 
@@ -43,6 +43,12 @@ PROVIDER_CONFIGS = {
         "api_key_env": "OPENAI_API_KEY",
         "description": "OpenAI models",
     },
+    "qwen": {
+        "default_model": "Qwen2.5-7B-Instruct",
+        "api_key_env": "QWEN_API_KEY",
+        "base_url_env": "QWEN_API_BASE",
+        "description": "Qwen models via OpenAI-compatible endpoint",
+    },
 }
 
 # =============================================================================
@@ -58,8 +64,10 @@ DEFAULT_MODEL = os.getenv("LLM_MODEL", None)  # None means use provider default
 PLANNING_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE_PLANNING", "0.0"))
 
 # Default temperature for players (higher = more creative)
-# Can be overridden by environment variable: LLM_TEMPERATURE_PLAYER  
-PLAYER_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE_PLAYER", "0.3"))
+# Lowering this makes player outputs more deterministic and more likely to
+# follow strict JSON formatting instructions in their prompts.
+# Can be overridden by environment variable: LLM_TEMPERATURE_PLAYER
+PLAYER_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE_PLAYER", "0.0"))
 
 
 # =============================================================================
@@ -72,6 +80,10 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 # Surf (custom OpenAI-compatible endpoint)
 SURF_API_BASE = os.getenv("SURF_API_BASE")  # e.g., "http://localhost:8000/v1"
 SURF_API_KEY = os.getenv("SURF_API_KEY")  # Required for Surf provider
+
+# Qwen (OpenAI-compatible endpoint)
+QWEN_API_BASE = os.getenv("QWEN_API_BASE")  # e.g., "http://localhost:8000/v1"
+QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 
 # OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -186,6 +198,28 @@ def create_llm(
             **kwargs
         )
     
+    elif provider == "qwen":
+        from langchain_openai import ChatOpenAI
+
+        if not QWEN_API_BASE:
+            raise ValueError(
+                "QWEN_API_BASE not found. Set it in your .env file.\n"
+                "Example: QWEN_API_BASE=http://localhost:8000/v1"
+            )
+
+        if not QWEN_API_KEY:
+            raise ValueError(
+                "QWEN_API_KEY not found. Set it in your .env file."
+            )
+
+        return ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            openai_api_key=QWEN_API_KEY,
+            openai_api_base=QWEN_API_BASE,
+            **kwargs
+        )
+
     else:
         available = list(PROVIDER_CONFIGS.keys())
         raise ValueError(

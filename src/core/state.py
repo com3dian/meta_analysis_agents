@@ -4,7 +4,9 @@ Defines the state schemas for the multi-agent system.
 This module contains TypedDict definitions for:
 1. StepExecutionState: State for executing a single plan step with parallel players
 """
-from typing import TypedDict, List, Dict, Any, Optional
+from typing import TypedDict, List, Dict, Any, Optional, Type
+
+from pydantic import BaseModel
 
 
 class PlayerResult(TypedDict):
@@ -59,7 +61,10 @@ class StepExecutionState(TypedDict):
     player_results: List[PlayerResult] # Results from parallel execution
     debate_log: List[DebateEntry]      # Log of debate entries
     
+    # --- Structured Output ---
+    output_schema: Optional[Type[BaseModel]]  # Pydantic schema for structured output
+    
     # --- Output ---
-    consolidated_result: Optional[str] # Final synthesized result
+    consolidated_result: Optional[Any] # Final synthesized result
     produced_artifacts: Dict[str, Any] # Artifacts produced by this step
     error: Optional[str]               # Error message if something went wrong

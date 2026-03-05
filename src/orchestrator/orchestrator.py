@@ -4,9 +4,10 @@ Main Orchestrator - Coordinates planning and execution.
 
 import logging
 import uuid
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Type, Union
 
 from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import BaseModel
 
 from src.core.schemas import Plan, ExecutionResult
 
@@ -133,27 +134,82 @@ class Orchestrator:
         self,
         plan: Plan,
         context: ExecutionContext,
+        objective: str = None,
+        output_schema: Optional[Type[BaseModel]] = None,
     ) -> ExecutionResult:
+        logging.info("=" * 60)
+        logging.info("EXECUTING PLAN")
+        logging.info(f"Context: {context.name}")
+        logging.info(f"Plan steps: {len(plan.steps)}")
+        if objective:
+            logging.info(f"Objective: {objective}")
+        if output_schema:
+            logging.info(f"Output schema: {output_schema.__name__}")
+        logging.info("=" * 60)
+        
+        # Log plan details
+        logging.info("Plan Overview:")
+        for i, step in enumerate(plan.steps):
+            target_info = (
+                f" (targets: {', '.join(step.target_resources)})" 
+                if step.target_resources else ""
+            )
+            logging.info(
+                f"  Step {i + 1}/{len(plan.steps)}: {step.task}"
+                f" [Player: {step.player}]{target_info}"
+            )
+        
+        logging.info("-" * 60)
+        logging.info("Initializing execution context...")
         context_key = f"ctx_{uuid.uuid4().hex[:8]}"
         register_context(context_key, context)
+        logging.info(f"Context registered with key: {context_key}")
 
         effective_player_pool = self._get_effective_player_pool()
+        logging.info(f"Using player pool: {effective_player_pool}")
+        logging.info(f"Topology: {self.topology_name}")
+        logging.info("-" * 60)
 
         try:
-            return self.executor.execute(
+            logging.info("Starting plan execution...")
+            result = self.executor.execute(
                 plan=plan,
                 context=context,
                 context_key=context_key,
+                output_schema=output_schema,
                 player_pool=effective_player_pool,
+                objective=objective,
             )
+            
+            logging.info("=" * 60)
+            logging.info("PLAN EXECUTION COMPLETED")
+            logging.info(f"Steps completed: {result.steps_completed}/{result.plan_steps_count}")
+            logging.info(f"Overall success: {result.success}")
+            if result.error:
+                logging.warning(f"Execution error: {result.error}")
+            logging.info(f"Artifacts produced: {list(result.final_workspace.keys())}")
+            logging.info("=" * 60)
+            
+            return result
+        except Exception as e:
+            logging.error("=" * 60)
+            logging.error("PLAN EXECUTION FAILED")
+            logging.error(f"Error: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            logging.error("=" * 60)
+            raise
         finally:
+            logging.info("Cleaning up context registry...")
             clear_registry()
+            logging.info("Context registry cleared")
 
     def run(
         self,
         source: Union[str, List[str], Dict[str, str], ExecutionContext],
         objective: str,
         name: str = "context",
+        output_schema: Optional[Type[BaseModel]] = None,
         **kwargs,
     ) -> Optional[ExecutionResult]:
         if isinstance(source, ExecutionContext):
@@ -165,6 +221,8 @@ class Orchestrator:
         logging.info("STARTING ORCHESTRATION")
         logging.info(f"Context: {context.name}")
         logging.info(f"Objective: {objective}")
+        if output_schema:
+            logging.info(f"Output schema: {output_schema.__name__}")
         logging.info("=" * 60)
 
         plan = self.generate_plan(context=context, objective=objective)
@@ -174,7 +232,7 @@ class Orchestrator:
             return None
 
         result = self.execute_plan(
-            plan=plan, context=context
+            plan=plan, context=context, objective=objective, output_schema=output_schema
         )
 
         return result

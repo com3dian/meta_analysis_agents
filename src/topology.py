@@ -33,7 +33,13 @@ EXECUTION_TOPOLOGIES: Dict[str, Dict[str, Any]] = {
         ),
         "players_per_step": 3,
         "debate_rounds": 2,
-        "player_pool": ["data_analyst", "schema_expert", "metadata_specialist"],
+        "player_pool": [
+            "value_identifier",
+            "labeller",
+            "schema_reasoner",
+            "critic",
+            "schema_expert",
+        ],
     },
     "fast": {
         "description": (
@@ -41,7 +47,12 @@ EXECUTION_TOPOLOGIES: Dict[str, Dict[str, Any]] = {
         ),
         "players_per_step": 2,
         "debate_rounds": 1,
-        "player_pool": ["data_analyst", "schema_expert"],
+        "player_pool": [
+            "value_identifier",
+            "labeller",
+            "schema_reasoner",
+            "schema_expert",
+        ],
     },
     "thorough": {
         "description": (
@@ -49,7 +60,13 @@ EXECUTION_TOPOLOGIES: Dict[str, Dict[str, Any]] = {
         ),
         "players_per_step": 4,
         "debate_rounds": 3,
-        "player_pool": ["data_analyst", "schema_expert", "metadata_specialist", "critic"],
+        "player_pool": [
+            "value_identifier",
+            "labeller",
+            "schema_reasoner",
+            "critic",
+            "schema_expert",
+        ],
     },
     "single": {
         "description": (
@@ -57,6 +74,6 @@ EXECUTION_TOPOLOGIES: Dict[str, Dict[str, Any]] = {
         ),
         "players_per_step": 1,
         "debate_rounds": 0,
-        "player_pool": ["data_analyst"],
+        "player_pool": ["value_identifier"],
     },
 }

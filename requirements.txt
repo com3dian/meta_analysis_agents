@@ -5,4 +5,5 @@ langchain-openai
 pydantic
 python-dotenv
 pandas
+pypdf
 ruff  # For linting

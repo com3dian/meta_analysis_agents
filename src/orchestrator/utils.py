@@ -1,4 +1,103 @@
-from typing import List, Dict, Any, Tuple
+"""
+Utility functions for the orchestrator module.
+"""
+import re
+from typing import List, Optional, Dict, Any, Tuple
+
+
+def filter_objective_by_sections(objective: str, sections: List[str]) -> str:
+    """
+    Filter an objective string to only include specified sections.
+    
+    Sections are identified by markdown headers like:
+    - **Step 1: Label the Original Document**
+    - **Step 2: Extract and Structure Records**
+    - **META-ANALYTIC SCHEMA (CRITICAL)**
+    - **SCHEMA HANDLING RULES**
+    - etc.
+    
+    Args:
+        objective: The full objective string
+        sections: List of section identifiers to include. If empty, returns full objective.
+                 Can match partial section names (e.g., "labeling" matches "Step 1: Label...")
+    
+    Returns:
+        Filtered objective string containing only the specified sections plus the schema
+    """
+    if not sections:
+        return objective
+    
+    # Always include schema-related sections
+    always_include = ["META-ANALYTIC SCHEMA", "SCHEMA HANDLING", "schema"]
+    
+    # Split objective into sections based on markdown headers
+    lines = objective.split('\n')
+    filtered_lines = []
+    include_current = False
+    in_schema_section = False
+    schema_lines = []
+    
+    for line in lines:
+        # Check if this is a header (starts with ** or #)
+        stripped = line.strip()
+        is_header = (stripped.startswith('**') and stripped.endswith('**')) or \
+                   (stripped.startswith('#'))
+        
+        if is_header:
+            header_text = stripped.lower()
+            should_include = False
+            
+            # Always include schema sections
+            if any(keyword in header_text for keyword in always_include):
+                should_include = True
+                in_schema_section = True
+                schema_lines.append(line)
+            else:
+                # Check if any requested section matches
+                for section in sections:
+                    if section.lower() in header_text:
+                        should_include = True
+                        break
+                if not should_include:
+                    in_schema_section = False
+            
+            include_current = should_include
+            
+            if not in_schema_section and include_current:
+                filtered_lines.append(line)
+        else:
+            if in_schema_section:
+                schema_lines.append(line)
+            elif include_current:
+                filtered_lines.append(line)
+    
+    # Combine schema section with filtered sections
+    if schema_lines:
+        result = '\n'.join(schema_lines) + '\n\n' + '\n'.join(filtered_lines)
+    else:
+        result = '\n'.join(filtered_lines)
+    
+    return result.strip() if result.strip() else objective
+
+
+def get_labeling_objective(objective: str) -> str:
+    """
+    Extract only the labeling-related parts of the objective for the labeller.
+    This ensures the labeller doesn't see extraction/structuring instructions.
+    """
+    # Look for labeling-related sections
+    sections_to_include = [
+        "label",
+        "Label",
+        "labeling",
+        "Labeling",
+        "Step 1",
+        "META-ANALYTIC SCHEMA",
+        "SCHEMA HANDLING"
+    ]
+    
+    return filter_objective_by_sections(objective, sections_to_include)
+
 
 def validate_plan_dataflow(plan: List[Dict[str, Any]]) -> Tuple[bool, str]:
     """

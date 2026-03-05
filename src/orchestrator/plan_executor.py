@@ -9,12 +9,15 @@ This module provides the PlanExecutor class that:
 5. Produces the final result
 """
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Type
+
+from pydantic import BaseModel
 
 from src.core.schemas import Plan, ExecutionResult, StepResult
 from src.context import ExecutionContext
 
 from .step_executor import get_step_execution_graph, create_step_state
+from .utils import filter_objective_by_sections
 from ..topology import EXECUTION_TOPOLOGIES
 
 
@@ -50,7 +53,9 @@ class PlanExecutor:
         plan: Plan,
         context: ExecutionContext,
         context_key: str,
+        output_schema: Optional[Type[BaseModel]] = None,
         player_pool: List[str] = None,
+        objective: str = None,
     ) -> ExecutionResult:
         """
         Execute the complete plan.
@@ -67,6 +72,45 @@ class PlanExecutor:
             "_context_key": context_key,
             "_context_info": context.to_dict(),
         }
+        
+        # Store the full objective as an artifact so it can be filtered per step,
+        # and also expose it (and the derived schema) as normal artifacts so that
+        # they appear in the final workspace and can be referenced explicitly.
+        if objective:
+            workspace["_full_objective"] = objective
+            workspace["initial_objective"] = objective
+            
+            try:
+                schema_text = filter_objective_by_sections(
+                    objective, ["META-ANALYTIC SCHEMA"]
+                )
+                workspace["meta_analytic_schema"] = schema_text
+            except Exception as e:
+                logging.warning(
+                    f"Failed to extract meta-analytic schema from objective: {e}"
+                )
+        
+        # Snapshot the original document content from the context as an artifact so
+        # that the initial paper content is a first-class artifact in the plan.
+        try:
+            original_docs: Dict[str, Any] = {}
+            for resource in context.resources:
+                try:
+                    content = context.read_resource(resource)
+                    if isinstance(content, list):
+                        content = "\n\n".join(str(p) for p in content)
+                    original_docs[resource] = content
+                except Exception as e:
+                    logging.warning(
+                        f"Error reading resource '{resource}' "
+                        f"for original_document_text: {e}"
+                    )
+                    original_docs[resource] = f"[Error reading resource: {str(e)}]"
+            
+            workspace["original_document_text"] = original_docs
+        except Exception as e:
+            logging.warning(f"Failed to snapshot original document text: {e}")
+        
         step_results: List[StepResult] = []
 
         plan_steps = plan.to_dict_list()
@@ -83,6 +127,13 @@ class PlanExecutor:
                 logging.info(f"Target resources: {target_resources}")
 
             try:
+                is_final_step = (step_index == len(plan_steps) - 1)
+                step_output_schema = output_schema if is_final_step else None
+                if step_output_schema:
+                    logging.info(
+                        f"  Final step will use structured output: {step_output_schema.__name__}"
+                    )
+                
                 step_state = create_step_state(
                     step_index=step_index,
                     step_dict=step_dict,
@@ -92,6 +143,7 @@ class PlanExecutor:
                     players_per_step=self.topology["players_per_step"],
                     debate_rounds=self.topology["debate_rounds"],
                     player_pool=effective_player_pool,
+                    output_schema=step_output_schema,
                 )
 
                 final_step_state = self.step_graph.invoke(step_state)
@@ -175,3 +227,32 @@ class PlanExecutor:
         This is a placeholder and should be implemented based on the specific needs of the agent.
         """
         return self._filter_workspace(workspace)
+
+
+def execute_plan(
+    plan: Plan,
+    context: ExecutionContext,
+    context_key: str,
+    meta_analytic_standard: str,
+    topology_name: str = "default",
+) -> ExecutionResult:
+    """
+    Convenience function to execute a plan.
+
+    Args:
+        plan: The Plan object to execute
+        context: The ExecutionContext to analyze
+        context_key: Key for the ExecutionContext in the tool registry
+        meta_analytic_standard: The meta-analytic standard to follow
+        topology_name: Name of the execution topology
+
+    Returns:
+        ExecutionResult with all results
+    """
+    executor = PlanExecutor(topology_name=topology_name)
+    return executor.execute(
+        plan=plan,
+        context=context,
+        context_key=context_key,
+        meta_analytic_standard=meta_analytic_standard,
+    )
