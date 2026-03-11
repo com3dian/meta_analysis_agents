@@ -62,6 +62,52 @@ orchestrator.run(
 """
 
 METADATA_STANDARDS = {
+    "wopke_100": """
+{
+    "Year of data": "Year(s) when the experiment data were collected. Example: 2018 or 2017–2019.",
+    "Duration of experiment": "Total time the experiment ran from first sowing to final harvest. Example: 120 days or 2 growing seasons.",
+    "Experimental design": "Type of experimental layout used. Example: Randomized Complete Block Design (RCBD).",
+    "Sowing date 1": "Date when Crop species 1 (the first species listed in the intercropping system) was sown. Example: Zea mays sown 15 April 2019.",
+    "Sowing date 2": "Date when Crop species 2 (the second species listed in the intercropping system) was sown. Example: Glycine max sown 20 April 2019.",
+    "Harvest date 1": "Date when Crop species 1 (the first species listed in the intercropping system) was harvested. Example: Zea mays harvested 10 September 2019.",
+    "Harvest date 2": "Date when Crop species 2 (the second species listed in the intercropping system) was harvested. Example: Glycine max harvested 25 August 2019.",
+    "Lat": "Latitude of the experimental site in decimal degrees. Example: 35.12.",
+    "Lon": "Longitude of the experimental site in decimal degrees. Example: -1.56.",
+    "Crop species 1": "Common or scientific name of the first crop species in the intercropping system (the first species mentioned in the pair). Example: Wheat or Triticum aestivum.",
+    "Crop species 2": "Common or scientific name of the second crop species in the intercropping system (the second species mentioned in the pair). Example: Soybean or Glycine max.",
+    "Crop type 1": "Agronomic functional type of Crop species 1 inferred from the species (e.g., cereal, legume, oilseed, root crop). Example: cereal.",
+    "Crop type 2": "Agronomic functional type of Crop species 2 inferred from the species (e.g., cereal, legume, oilseed, root crop). Example: legume.",
+    "Intercropping pattern": "Spatial arrangement of the two crops in the intercrop; classify as Row (alternating rows of each crop), Strip (blocks or strips with multiple rows per crop), or Mixed (species mixed within the same row or stand). Example: Row.",
+    "Density ic 1": "Plant density of Crop species 1 in the intercropping treatment. Example: 5.",
+    "Density ic 2": "Plant density of Crop species 2 in the intercropping treatment. Example: 20.",
+    "Density sc 1": "Plant density of Crop species 1 when grown as a sole crop (monoculture). Example: 8。",
+    "Density sc 2": "Plant density of Crop species 2 when grown as a sole crop (monoculture). Example: 30.",
+    "N input SC1": "Nitrogen fertilizer applied to the sole crop treatment of Crop species 1. Example: 120.",
+    "N input SC2": "Nitrogen fertilizer applied to the sole crop treatment of Crop species 2. Example: 30.",
+    "N input IC1": "Nitrogen fertilizer attributed to Crop species 1 in the intercropping treatment. Example: 60.",
+    "N input IC2": "Nitrogen fertilizer attributed to Crop species 2 in the intercropping treatment. Example: 30.",
+    "N total in IC": "Total nitrogen fertilizer applied in the intercropping treatment. Example: 90.",
+    "N Unit": "Unit used for nitrogen fertilizer amounts. Example: kg N ha−1.",
+    "P input SC1": "Phosphorus fertilizer applied to the sole crop treatment of Crop species 1. Example: 40.",
+    "P input SC2": "Phosphorus fertilizer applied to the sole crop treatment of Crop species 2. Example: 30.",
+    "P input IC1": "Phosphorus fertilizer attributed to Crop species 1 in the intercropping treatment. Example: 20.",
+    "P input IC2": "Phosphorus fertilizer attributed to Crop species 2 in the intercropping treatment. Example: 20.",
+    "P total in IC": "Total phosphorus fertilizer applied in the intercropping treatment. Example: 40.",
+    "P Unit": "Unit used for phosphorus fertilizer amounts. Example: kg P2O5 ha−1.",
+    "K input SC1": "Potassium fertilizer applied to the sole crop treatment of Crop species 1. Example: 60.",
+    "K input SC2": "Potassium fertilizer applied to the sole crop treatment of Crop species 2. Example: 50.",
+    "K input IC1": "Potassium fertilizer attributed to Crop species 1 in the intercropping treatment. Example: 30.",
+    "K input IC2": "Potassium fertilizer attributed to Crop species 2 in the intercropping treatment. Example: 30.",
+    "K total in IC": "Total potassium fertilizer applied in the intercropping treatment. Example: 60.",
+    "K Unit": "Unit used for potassium fertilizer amounts. Example: kg K2O ha−1.",
+    "Data source": "Location of the extracted data within the publication. Example: Table 1,2; Figure 3; Supplementary Table S1.",
+    "unified yield sc 1": "Yield of Crop species 1 grown as a sole crop, converted to a common yield unit. Example: 8.5.",
+    "unified yield sc 2": "Yield of Crop species 2 grown as a sole crop, converted to a common yield unit. Example: 2.4.",
+    "unified yield ic 1": "Yield of Crop species 1 when grown in the intercropping treatment. Example: 6.1.",
+    "unified yield ic 2": "Yield of Crop species 2 when grown in the intercropping treatment. Example: 1.8.",
+    "Yield unit": "Unit used for all standardized yields. Example: t ha−1."
+}
+""",
     "climate_vs_cropyield": """
 {
     "crop_type": "specific crop name (e.g., maize, wheat, rice, soybean, corn)",

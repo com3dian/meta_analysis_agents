@@ -9,7 +9,7 @@ This module provides the PlanExecutor class that:
 5. Produces the final result
 """
 import logging
-from typing import Dict, Any, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type
 
 from pydantic import BaseModel
 
@@ -56,7 +56,20 @@ class PlanExecutor:
         output_schema: Optional[Type[BaseModel]] = None,
         player_pool: List[str] = None,
         objective: str = None,
+        on_step_start: Optional[Callable[[int, int, str, str], None]] = None,
+        on_node_complete: Optional[Callable[[int, str], None]] = None,
     ) -> ExecutionResult:
+        """
+        Execute the complete plan.
+
+        Args:
+            on_step_start: Called at the start of each step with
+                (step_index, total_steps, task, player_role).
+            on_node_complete: Called after each LangGraph node completes with
+                (step_index, node_name). Node names are one of:
+                'execute_parallel_node', 'critique_node', 'revise_node',
+                'synthesize_node'.
+        """
         """
         Execute the complete plan.
         """
@@ -126,6 +139,14 @@ class PlanExecutor:
             if target_resources:
                 logging.info(f"Target resources: {target_resources}")
 
+            if on_step_start:
+                on_step_start(
+                    step_index,
+                    len(plan_steps),
+                    step_dict.get("task", ""),
+                    step_dict.get("player", ""),
+                )
+
             try:
                 is_final_step = (step_index == len(plan_steps) - 1)
                 step_output_schema = output_schema if is_final_step else None
@@ -146,7 +167,15 @@ class PlanExecutor:
                     output_schema=step_output_schema,
                 )
 
-                final_step_state = self.step_graph.invoke(step_state)
+                if on_node_complete:
+                    # Stream node-by-node so we can report progress after each phase
+                    final_step_state = dict(step_state)
+                    for node_updates in self.step_graph.stream(step_state):
+                        for node_name, updates in node_updates.items():
+                            final_step_state.update(updates)
+                            on_node_complete(step_index, node_name)
+                else:
+                    final_step_state = self.step_graph.invoke(step_state)
 
                 if final_step_state.get("error"):
                     error_msg = final_step_state["error"]

@@ -129,8 +129,11 @@ def extract_meta_analysis(
     if schema is None:
         schema = DEFAULT_SCHEMA
     
-    # Read the markdown file
-    document_content = read_markdown_file(md_file_path)
+    # Read the document — supports both .md and .pdf
+    from src.experimentutils.file_utils import read_paper_text
+    from src.experimentutils.eval_utils import highlight_numbers_and_tables
+    document_content = read_paper_text(md_file_path)
+    document_content = highlight_numbers_and_tables(document_content)
     
     # Format the extraction prompt with schema
     if prompt_style == "simple":

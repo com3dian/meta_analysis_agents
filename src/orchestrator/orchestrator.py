@@ -4,7 +4,7 @@ Main Orchestrator - Coordinates planning and execution.
 
 import logging
 import uuid
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel
@@ -136,6 +136,8 @@ class Orchestrator:
         context: ExecutionContext,
         objective: str = None,
         output_schema: Optional[Type[BaseModel]] = None,
+        on_step_start: Optional[Callable[[int, int, str, str], None]] = None,
+        on_node_complete: Optional[Callable[[int, str], None]] = None,
     ) -> ExecutionResult:
         logging.info("=" * 60)
         logging.info("EXECUTING PLAN")
@@ -179,6 +181,8 @@ class Orchestrator:
                 output_schema=output_schema,
                 player_pool=effective_player_pool,
                 objective=objective,
+                on_step_start=on_step_start,
+                on_node_complete=on_node_complete,
             )
             
             logging.info("=" * 60)

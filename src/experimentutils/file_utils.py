@@ -24,6 +24,7 @@ from typing import Dict, List, Optional, Tuple
 # Default data paths
 DEFAULT_PAPER_OUTPUT_DIR = "data/wopke_100/paper_output"
 DEFAULT_SUBFOLDER = "hybrid_auto"
+DEFAULT_PDF_DIR = "data/wopke_100/papers"
 
 
 def get_all_markdown_paths(
@@ -217,6 +218,252 @@ def list_paper_folders(
     return results
 
 
+def get_all_paper_paths(
+    base_dir: Optional[str] = None,
+    pdf_dir: Optional[str] = None,
+    subfolder: str = DEFAULT_SUBFOLDER,
+    absolute: bool = True,
+) -> List[str]:
+    """
+    Get all paper paths, preferring converted markdown files but falling back
+    to raw PDFs when the markdown output directory is empty.
+
+    Priority:
+    1. Markdown files in ``{base_dir}/{paper_folder}/{subfolder}/*.md``
+       (the pre-converted output from ``data/wopke_100/paper_output/``).
+    2. PDF files in ``{pdf_dir}/`` (``data/wopke_100/papers/``) when no
+       markdown files are found.
+
+    Args:
+        base_dir: Directory containing per-paper sub-folders with markdown
+                  output.  Defaults to ``data/wopke_100/paper_output``.
+        pdf_dir:  Directory containing the raw PDF files.
+                  Defaults to ``data/wopke_100/papers``.
+        subfolder: Sub-folder name within each paper folder that holds the
+                   ``.md`` file (default: ``"hybrid_auto"``).
+        absolute: Return absolute paths when *True* (default).
+
+    Returns:
+        List of paper paths sorted by filename.  When markdown files are
+        present the list contains ``.md`` paths; otherwise ``.pdf`` paths.
+
+    Example:
+        >>> paths = get_all_paper_paths()
+        >>> print(paths[0])
+        '/…/data/wopke_100/paper_output/1. Mason 1986…/hybrid_auto/1. Mason….md'
+        # or if paper_output is empty:
+        '/…/data/wopke_100/papers/1. Mason 1986….pdf'
+    """
+    project_root = _find_project_root()
+
+    # ── Try markdown files first ──────────────────────────────────────────────
+    if base_dir is None:
+        base_dir = os.path.join(project_root, DEFAULT_PAPER_OUTPUT_DIR)
+
+    md_paths = []
+    base_path = Path(base_dir)
+    if base_path.exists():
+        for paper_folder in sorted(base_path.iterdir()):
+            if not paper_folder.is_dir():
+                continue
+            subfolder_path = paper_folder / subfolder
+            if not subfolder_path.exists():
+                continue
+            for md_file in subfolder_path.glob("*.md"):
+                md_paths.append(str(md_file.absolute()) if absolute else str(md_file))
+
+    if md_paths:
+        return md_paths
+
+    # ── Fall back to PDF files ────────────────────────────────────────────────
+    if pdf_dir is None:
+        pdf_dir = os.path.join(project_root, DEFAULT_PDF_DIR)
+
+    pdf_path = Path(pdf_dir)
+    if not pdf_path.exists():
+        raise FileNotFoundError(
+            f"Neither markdown output directory ({base_dir}) nor PDF directory "
+            f"({pdf_dir}) contain any paper files."
+        )
+
+    pdf_paths = sorted(
+        str(p.absolute()) if absolute else str(p)
+        for p in pdf_path.iterdir()
+        if p.is_file() and p.suffix.lower() == ".pdf"
+    )
+    return pdf_paths
+
+
+def convert_pdf_to_markdown(
+    pdf_path: str,
+    output_dir: Optional[str] = None,
+    subfolder: str = DEFAULT_SUBFOLDER,
+    overwrite: bool = False,
+) -> str:
+    """
+    Convert a PDF paper to a Markdown file saved in the expected
+    ``paper_output/{paper_stem}/{subfolder}/{paper_stem}.md`` directory structure.
+
+    The converter uses ``pymupdf`` (PyMuPDF) for text extraction.
+    Each PDF page is rendered as a plain-text block separated by a page-break
+    comment, which is sufficient for LLM consumption.
+
+    Args:
+        pdf_path: Absolute or relative path to the source PDF.
+        output_dir: Root directory for output (defaults to
+                    ``data/wopke_100/paper_output`` relative to project root).
+        subfolder:  Sub-folder within the per-paper directory where the
+                    ``.md`` file is written (default: ``"hybrid_auto"``).
+        overwrite:  If *True*, overwrite an existing ``.md`` file.
+                    If *False* (default), return the existing path immediately.
+
+    Returns:
+        Absolute path to the written (or already-existing) Markdown file.
+
+    Raises:
+        ImportError: If ``pymupdf`` is not installed.
+        FileNotFoundError: If ``pdf_path`` does not exist.
+    """
+    try:
+        import pymupdf  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "pymupdf is required for PDF-to-Markdown conversion.  "
+            "Install it with: pip install pymupdf"
+        ) from exc
+
+    pdf_path_obj = Path(pdf_path).resolve()
+    if not pdf_path_obj.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+    paper_stem = pdf_path_obj.stem  # e.g. "1. Mason 1986 Cassava-cowpea…"
+
+    if output_dir is None:
+        project_root = _find_project_root()
+        output_dir = os.path.join(project_root, DEFAULT_PAPER_OUTPUT_DIR)
+
+    md_dir  = Path(output_dir) / paper_stem / subfolder
+    md_path = md_dir / f"{paper_stem}.md"
+
+    if md_path.exists() and not overwrite:
+        return str(md_path)
+
+    md_dir.mkdir(parents=True, exist_ok=True)
+
+    doc = pymupdf.open(str(pdf_path_obj))
+
+    lines: list = [f"# {paper_stem}\n"]
+    for page_num, page in enumerate(doc, start=1):
+        lines.append(f"\n<!-- page {page_num} -->\n")
+        blocks = page.get_text("blocks")  # list of (x0,y0,x1,y1, text, …)
+        # Sort top-to-bottom, left-to-right
+        blocks = sorted(blocks, key=lambda b: (round(b[1] / 20), b[0]))
+        for block in blocks:
+            text = block[4].strip() if len(block) > 4 else ""
+            if text:
+                lines.append(text + "\n")
+
+    doc.close()
+
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(md_path)
+
+
+def convert_all_pdfs_to_markdown(
+    pdf_dir: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    subfolder: str = DEFAULT_SUBFOLDER,
+    overwrite: bool = False,
+    verbose: bool = True,
+) -> List[str]:
+    """
+    Batch-convert all PDF files in ``pdf_dir`` to Markdown.
+
+    Calls :func:`convert_pdf_to_markdown` for every ``.pdf`` file found.
+    Already-converted files are skipped unless ``overwrite=True``.
+
+    Args:
+        pdf_dir:    Directory containing PDF files
+                    (defaults to ``data/wopke_100/papers``).
+        output_dir: Root output directory
+                    (defaults to ``data/wopke_100/paper_output``).
+        subfolder:  Sub-folder name within each per-paper directory.
+        overwrite:  Passed through to :func:`convert_pdf_to_markdown`.
+        verbose:    Print progress when *True*.
+
+    Returns:
+        List of absolute paths to all written (or already-existing) Markdown files.
+    """
+    project_root = _find_project_root()
+
+    if pdf_dir is None:
+        pdf_dir = os.path.join(project_root, DEFAULT_PDF_DIR)
+
+    pdf_files = sorted(
+        p for p in Path(pdf_dir).iterdir()
+        if p.is_file() and p.suffix.lower() == ".pdf"
+    )
+
+    md_paths: List[str] = []
+    for i, pdf in enumerate(pdf_files, start=1):
+        if verbose:
+            print(f"[{i}/{len(pdf_files)}] {pdf.name[:70]}")
+        md = convert_pdf_to_markdown(
+            str(pdf),
+            output_dir=output_dir,
+            subfolder=subfolder,
+            overwrite=overwrite,
+        )
+        md_paths.append(md)
+
+    if verbose:
+        print(f"\nDone — {len(md_paths)} markdown files ready.")
+    return md_paths
+
+
+def read_paper_text(file_path: str) -> str:
+    """
+    Read the full text of a paper, supporting both Markdown and PDF files.
+
+    For Markdown (``.md``) files the content is returned as-is.
+    For PDF files all page text is extracted with ``pypdf`` and joined with
+    newlines.
+
+    Args:
+        file_path: Path to a ``.md`` or ``.pdf`` file.
+
+    Returns:
+        Full text content of the document.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the file extension is not supported.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    ext = path.suffix.lower()
+
+    if ext in (".md", ".markdown", ".txt"):
+        return path.read_text(encoding="utf-8")
+
+    if ext == ".pdf":
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except ImportError as exc:
+            raise ImportError(
+                "pypdf is required to read PDF files.  Install it with: pip install pypdf"
+            ) from exc
+        reader = PdfReader(str(path))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n".join(pages)
+
+    raise ValueError(
+        f"Unsupported file extension '{ext}'.  Expected .md, .markdown, .txt, or .pdf."
+    )
+
+
 def _find_project_root() -> str:
     """
     Find the project root directory by looking for common markers.
@@ -290,6 +537,10 @@ def filter_paths_by_pattern(
 # Export all functions
 __all__ = [
     "get_all_markdown_paths",
+    "get_all_paper_paths",
+    "read_paper_text",
+    "convert_pdf_to_markdown",
+    "convert_all_pdfs_to_markdown",
     "get_markdown_paths_from_directory", 
     "get_paper_info_from_path",
     "list_paper_folders",
