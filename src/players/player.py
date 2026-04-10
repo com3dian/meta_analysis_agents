@@ -11,14 +11,22 @@ it can use to accomplish tasks.
 
 Uses the unified ExecutionContext abstraction for all data access.
 """
-from typing import List, Dict, Any, Optional, Union, Type
+from typing import List, Dict, Any, Optional, Union, Type, get_origin
 
 from pydantic import BaseModel
 from langchain_core.tools import BaseTool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from ..config import PLAYER_TEMPERATURE, create_llm, LLM_PROVIDER
+from ..config import PLAYER_TEMPERATURE, create_llm, LLM_PROVIDER, structured_output_kwargs
+
+
+def _primary_list_field_name(model_cls: Type[BaseModel]) -> Optional[str]:
+    """Name of the first ``list``-typed field (wrapper record list), if any."""
+    for name, finfo in model_cls.model_fields.items():
+        if get_origin(finfo.annotation) is list:
+            return name
+    return None
 
 
 class Player:
@@ -130,14 +138,20 @@ class Player:
         
         # Document content resolution strategy:
         # - For the labeller, ALWAYS read the full original document from the context.
-        # - For all other players, if a labeled_text artifact exists in the workspace,
-        #   use that as the primary document content instead of re-reading the raw paper.
+        # - For direct_extractor, ALWAYS read the raw paper from context (same input family
+        #   as standalone ``extract_meta_analysis``), matching the planner task text.
+        # - For other players, if labeled_text exists, use it as primary document content.
         from ..tools.context_tools import get_context
         document_contents = {}
-        
+
+        is_direct_extractor = "direct_extractor" in self.name.lower()
+
         try:
-            # Non-labeller players prefer to consume the labeled text artifact if available.
-            if not is_labeller and "labeled_text" in workspace:
+            if (
+                not is_labeller
+                and not is_direct_extractor
+                and "labeled_text" in workspace
+            ):
                 labeled_value = workspace["labeled_text"]
                 # Allow either a direct string or a dict wrapper like {"labeled_text": "..."}
                 if isinstance(labeled_value, dict) and "labeled_text" in labeled_value:
@@ -156,11 +170,17 @@ class Player:
                     try:
                         content = actual_context.read_resource(resource)
                         if isinstance(content, str):
-                            document_contents[resource] = content
+                            pass
                         elif isinstance(content, list):
-                            document_contents[resource] = "\n\n".join(content)
+                            content = "\n\n".join(content)
                         else:
-                            document_contents[resource] = str(content)
+                            content = str(content)
+                        if is_direct_extractor and isinstance(content, str):
+                            from ..experimentutils.eval_utils import (
+                                highlight_numbers_and_tables,
+                            )
+                            content = highlight_numbers_and_tables(content)
+                        document_contents[resource] = content
                     except Exception as e:
                         document_contents[resource] = f"[Error reading resource: {str(e)}]"
         except Exception as e:
@@ -259,7 +279,28 @@ Execute this task and provide your output.""")
                     if not field_value_pairs:
                         tool_results[tool.name] = "Error: 'field_value_pairs' artifact not found in workspace."
                         continue
-                    
+
+                    # The value_identifier stores field_value_pairs as a JSON string
+                    # (from its synthesis output).  Parse it into a Python list so the
+                    # tool's Pydantic args_schema validation succeeds.
+                    if isinstance(field_value_pairs, str):
+                        import json as _json
+                        try:
+                            field_value_pairs = _json.loads(field_value_pairs)
+                        except Exception:
+                            # Try extracting a JSON array from within the string
+                            import re as _re
+                            _m = _re.search(r'\[.*\]', field_value_pairs, _re.DOTALL)
+                            if _m:
+                                try:
+                                    field_value_pairs = _json.loads(_m.group(0))
+                                except Exception:
+                                    tool_results[tool.name] = "Error: could not parse field_value_pairs JSON."
+                                    continue
+                            else:
+                                tool_results[tool.name] = "Error: field_value_pairs is not valid JSON."
+                                continue
+
                     # Run on the relevant resources (usually the primary document)
                     for resource in resources_to_analyze or [resources[0] if resources else ""]:
                         if not resource:
@@ -276,7 +317,67 @@ Execute this task and provide your output.""")
                         except Exception as e:
                             tool_results[f"{resource}:{tool.name}"] = f"Error: {str(e)}"
                     continue
-                
+
+                # Special handling for record-level XML tagging: reads labeled_text and
+                # candidate_records from the workspace rather than from context, because
+                # these artifacts are produced by previous plan steps, not stored in the
+                # original ExecutionContext.
+                if "xml_tag_records" in tool_name:
+                    labeled_text_artifact = workspace.get("labeled_text", "")
+                    candidate_records_artifact = workspace.get("candidate_records", [])
+                    if not labeled_text_artifact:
+                        tool_results[tool.name] = "Error: 'labeled_text' artifact not found in workspace."
+                        continue
+                    if not candidate_records_artifact:
+                        tool_results[tool.name] = "Error: 'candidate_records' artifact not found in workspace."
+                        continue
+
+                    # Ensure labeled_text is a plain str (not a LangChain wrapper).
+                    labeled_text_artifact = str(labeled_text_artifact)
+
+                    # candidate_records may arrive as a JSON string from the
+                    # record_grouper's string synthesis — parse it to a Python list.
+                    if isinstance(candidate_records_artifact, str):
+                        import json as _json
+                        import re as _re
+                        try:
+                            candidate_records_artifact = _json.loads(candidate_records_artifact)
+                        except Exception:
+                            _m = _re.search(r'\[.*\]', candidate_records_artifact, _re.DOTALL)
+                            if _m:
+                                try:
+                                    candidate_records_artifact = _json.loads(_m.group(0))
+                                except Exception:
+                                    tool_results[tool.name] = "Error: could not parse candidate_records JSON."
+                                    continue
+                            else:
+                                tool_results[tool.name] = "Error: candidate_records is not valid JSON."
+                                continue
+
+                    # candidate_records may also be a Pydantic model — dump to a list of dicts.
+                    from pydantic import BaseModel as _BaseModel
+                    if isinstance(candidate_records_artifact, _BaseModel):
+                        dumped = candidate_records_artifact.model_dump()
+                        # Unwrap the first list-valued field (e.g. yield_records)
+                        for v in dumped.values():
+                            if isinstance(v, list):
+                                candidate_records_artifact = v
+                                break
+                        else:
+                            candidate_records_artifact = [dumped]
+
+                    try:
+                        result = tool.invoke(
+                            {
+                                "labeled_text": labeled_text_artifact,
+                                "candidate_records": candidate_records_artifact,
+                            }
+                        )
+                        tool_results[tool.name] = result
+                    except Exception as e:
+                        tool_results[tool.name] = f"Error: {str(e)}"
+                    continue
+
                 # Generic resource-specific tools
                 if any(
                     kw in tool_name
@@ -324,12 +425,14 @@ Execute this task and provide your output.""")
         is_labeller = "labeller" in self.name.lower() or "label" in task.lower()
         tagged_result = None
         if is_labeller:
-            # Prefer first non-error result from the XML tagging tool
+            # Prefer deterministic tool output over LLM generation.
+            # Check field-value tagger first, then record-level tagger.
             for key, value in tool_results.items():
-                if "xml_tag_from_field_values" in key and isinstance(value, str) and not value.startswith("Error:"):
-                    tagged_result = value
-                    break
-        
+                if isinstance(value, str) and not value.startswith("Error:"):
+                    if "xml_tag_from_field_values" in key or "xml_tag_records" in key:
+                        tagged_result = value
+                        break
+
         if tagged_result is not None:
             llm_response = tagged_result
         else:
@@ -497,7 +600,8 @@ while maintaining accuracy and your analytical perspective.""")
         self,
         task: str,
         all_results: List[Dict[str, Any]],
-        output_schema: Optional[Type[BaseModel]] = None
+        output_schema: Optional[Type[BaseModel]] = None,
+        baseline_record_count: Optional[int] = None,
     ) -> Union[str, BaseModel]:
         """
         Synthesize multiple results into a consolidated output.
@@ -513,6 +617,19 @@ while maintaining accuracy and your analytical perspective.""")
         Returns:
             Synthesized result as a string or Pydantic model instance
         """
+        # Deterministic tool-based players (labeller, record_labeller) must NOT go
+        # through an LLM synthesis step — the LLM would corrupt or truncate the
+        # carefully tagged XML document.  Pass the tool output through directly.
+        is_deterministic = "labeller" in self.name.lower()
+        if is_deterministic:
+            for r in all_results:
+                if r.get("player") == "schema_reference":
+                    continue
+                analysis = r.get("analysis", "")
+                if analysis and not str(analysis).startswith("Error:"):
+                    return analysis
+            # If all analyses are errors/empty, fall through to LLM as last resort.
+
         results_str = "\n\n".join([
             f"=== {r.get('player', 'Unknown')} ===\n{r.get('analysis', str(r))}"
             for r in all_results
@@ -520,7 +637,12 @@ while maintaining accuracy and your analytical perspective.""")
         
         if output_schema is not None:
             # Use structured output with Pydantic schema
-            return self._synthesize_structured(task, results_str, output_schema)
+            return self._synthesize_structured(
+                task,
+                results_str,
+                output_schema,
+                baseline_record_count=baseline_record_count,
+            )
         else:
             # Legacy string output
             return self._synthesize_string(task, results_str)
@@ -559,18 +681,57 @@ Provide the consolidated result for this task. Output only the result, no commen
         })
     
     def _synthesize_structured(
-        self, 
-        task: str, 
-        results_str: str, 
-        output_schema: Type[BaseModel]
+        self,
+        task: str,
+        results_str: str,
+        output_schema: Type[BaseModel],
+        baseline_record_count: Optional[int] = None,
     ) -> BaseModel:
         """
         Synthesize results into a structured Pydantic model.
         
         Uses LangChain's with_structured_output() for guaranteed schema compliance.
         """
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", f"""You are {self.name}. {self.role_prompt}
+        rk = _primary_list_field_name(output_schema)
+        shape_hint = ""
+        if rk:
+            shape_hint = (
+                f'**Output shape:** Return one JSON object whose top-level key is exactly '
+                f'"{rk}" (array of records). Do not use "records", "data", or a bare array.\n\n'
+            )
+
+        is_record_refine = self.name == "record_extractor" or (
+            baseline_record_count is not None and baseline_record_count > 0
+        )
+
+        cardinality_block = ""
+        if baseline_record_count is not None and baseline_record_count > 0 and rk:
+            cardinality_block = (
+                f"\n**HARD RECORD COUNT:** Baseline `direct_records` has **{baseline_record_count}** experiment rows. "
+                f'The "{rk}" array MUST have length **at least {baseline_record_count}** (same baseline rows in order '
+                f"as indices 0..{baseline_record_count - 1}, refined in place). "
+                "Do NOT merge them into one record. You may append additional records only for clearly missing table rows.\n\n"
+            )
+
+        if is_record_refine and rk:
+            system_body = f"""You are {self.name}. {self.role_prompt}
+
+You are converting the analyst's per-record refinement work into the final structured schema.
+
+**This is NOT summarization.** Do NOT consolidate multiple experiment rows into one object.
+
+**Your job:**
+- Emit **one schema record per baseline experiment row** (plus any clearly necessary append-only rows).
+- Copy forward each baseline row, then apply field-level fixes/null-fills from the analyst text.
+- Use null only where the paper truly lacks a value for that row.
+
+**CRITICAL:**
+- Output MUST conform exactly to the provided schema
+- The "{rk}" list must preserve baseline cardinality (see HARD RECORD COUNT if present)
+- Use actual values, not placeholders
+- Never replace many rows with a single aggregate or "typical" row"""
+        else:
+            system_body = f"""You are {self.name}. {self.role_prompt}
 
 You are synthesizing results from multiple analysts into a structured format.
 
@@ -583,17 +744,23 @@ You are synthesizing results from multiple analysts into a structured format.
 **CRITICAL:**
 - Output MUST conform exactly to the provided schema
 - Use actual values, not placeholders like "..." 
-- Be specific and concrete"""),
+- Be specific and concrete
+- Produce every non-empty record from the analyses; do not return an empty list if records were extracted."""
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_body),
             ("human", """Task: {task}
 
 Results from all analysts:
 {all_results}
 
-Generate the final structured output.""")
+""" + shape_hint + cardinality_block + """Generate the final structured output."""),
         ])
         
-        # Use with_structured_output for guaranteed schema compliance
-        structured_llm = self.llm.with_structured_output(output_schema)
+        structured_llm = self.llm.with_structured_output(
+            output_schema,
+            **structured_output_kwargs(),
+        )
         chain = prompt | structured_llm
         
         return chain.invoke({

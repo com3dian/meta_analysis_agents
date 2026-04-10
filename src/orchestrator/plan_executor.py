@@ -92,16 +92,30 @@ class PlanExecutor:
         if objective:
             workspace["_full_objective"] = objective
             workspace["initial_objective"] = objective
-            
-            try:
-                schema_text = filter_objective_by_sections(
-                    objective, ["META-ANALYTIC SCHEMA"]
+
+            # Extract the actual JSON schema block from the objective.
+            # The header ends with ":" so the old section-splitting logic
+            # never recognised it.  Use a direct regex instead.
+            import re as _re
+            _schema_match = _re.search(
+                r'\*\*META-ANALYTIC SCHEMA[^*]*\*\*[:\s]*\n(\{.*?\})\s*\n',
+                objective,
+                _re.DOTALL,
+            )
+            if _schema_match:
+                workspace["meta_analytic_schema"] = _schema_match.group(1).strip()
+                logging.info(
+                    f"Extracted meta_analytic_schema "
+                    f"({len(workspace['meta_analytic_schema'])} chars)"
                 )
-                workspace["meta_analytic_schema"] = schema_text
-            except Exception as e:
+            else:
+                # Fallback: store the whole objective so players always have
+                # something to refer to, even if extraction failed.
                 logging.warning(
-                    f"Failed to extract meta-analytic schema from objective: {e}"
+                    "Could not extract JSON schema block from objective; "
+                    "storing full objective as meta_analytic_schema."
                 )
+                workspace["meta_analytic_schema"] = objective
         
         # Snapshot the original document content from the context as an artifact so
         # that the initial paper content is a first-class artifact in the plan.

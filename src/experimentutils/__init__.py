@@ -13,6 +13,14 @@ from .eval_utils import (
     get_paper_path_for_study,
     highlight_numbers_and_tables,
     build_extraction_context,
+    field_similarity_score,
+    find_crop_swap_pairs,
+    match_records_greedy,
+    evaluate_method_scores,
+    print_matching_pairs,
+    print_matching_pairs_from_df,
+    parse_field_value_pairs_artifact,
+    print_field_value_pairs_vs_gt,
 )
 from .file_utils import (
     get_all_markdown_paths,
@@ -82,4 +90,12 @@ __all__ = [
     "get_paper_path_for_study",
     "highlight_numbers_and_tables",
     "build_extraction_context",
+    "field_similarity_score",
+    "find_crop_swap_pairs",
+    "match_records_greedy",
+    "evaluate_method_scores",
+    "print_matching_pairs",
+    "print_matching_pairs_from_df",
+    "parse_field_value_pairs_artifact",
+    "print_field_value_pairs_vs_gt",
 ]

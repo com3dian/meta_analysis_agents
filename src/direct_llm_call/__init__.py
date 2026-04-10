@@ -55,7 +55,12 @@ from .prompts import (
     get_extraction_prompt,
     get_simple_extraction_prompt,
     get_custom_extraction_prompt,
+    get_tagged_extraction_prompt,
+    get_tagged_simple_extraction_prompt,
+    append_record_completeness_instructions,
     META_ANALYSIS_EXTRACTION_PROMPT_TEMPLATE,
+    TAGGED_DOCUMENT_PROMPT_PREFIX,
+    RECORD_EXTRACTION_COMPLETENESS_BLOCK,
 )
 from .utils import (
     read_markdown_file,
@@ -82,6 +87,8 @@ def extract_meta_analysis(
     provider: Optional[str] = None,
     records_key: str = "yield_records",
     prompt_style: str = "full",
+    debug_raw_response: bool = False,
+    debug_raw_chars: int = 2000,
 ) -> BaseModel:
     """
     Extract meta-analysis data from a markdown file using a single LLM call.
@@ -99,6 +106,8 @@ def extract_meta_analysis(
         provider: Optional LLM provider override (google, openai, surf, qwen)
         records_key: Key name for the records list in output (default: "yield_records")
         prompt_style: Style of prompt to use: "full", "simple", or "custom"
+        debug_raw_response: If True, prints raw model text before structured parsing
+        debug_raw_chars: Max number of raw characters to print
         
     Returns:
         A Pydantic model instance containing:
@@ -142,6 +151,28 @@ def extract_meta_analysis(
         prompt = get_custom_extraction_prompt(document_content, schema)
     else:
         prompt = get_extraction_prompt(document_content, schema)
+
+    # Optional debug pass: inspect raw text output before structured parsing.
+    if debug_raw_response:
+        try:
+            from src.config import create_llm
+            raw_llm = create_llm(
+                model_name=model_name,
+                temperature=temperature,
+                provider=provider,
+            )
+            raw_resp = raw_llm.invoke(prompt)
+            raw_text = raw_resp.content if hasattr(raw_resp, "content") else str(raw_resp)
+            raw_text = str(raw_text)
+            print("\n[DEBUG direct_llm raw response]\n")
+            if len(raw_text) > debug_raw_chars:
+                print(raw_text[:debug_raw_chars])
+                print(f"\n... [{len(raw_text) - debug_raw_chars} chars truncated]")
+            else:
+                print(raw_text)
+            print("\n[END DEBUG raw response]\n")
+        except Exception as e:
+            print(f"[DEBUG direct_llm raw response] failed: {e}")
     
     # Invoke the LLM with structured output
     result = invoke_with_schema(
@@ -288,7 +319,12 @@ __all__ = [
     "get_extraction_prompt",
     "get_simple_extraction_prompt",
     "get_custom_extraction_prompt",
+    "get_tagged_extraction_prompt",
+    "get_tagged_simple_extraction_prompt",
+    "append_record_completeness_instructions",
     "META_ANALYSIS_EXTRACTION_PROMPT_TEMPLATE",
+    "TAGGED_DOCUMENT_PROMPT_PREFIX",
+    "RECORD_EXTRACTION_COMPLETENESS_BLOCK",
     
     # LLM utilities
     "create_llm_with_structured_output",

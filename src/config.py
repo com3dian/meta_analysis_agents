@@ -4,10 +4,14 @@ Centralized configuration for the Metadata Agent.
 All configurable settings should be defined here.
 You can also override these via environment variables.
 
-Supported LLM Providers:
-- "google": Google Gemini models (requires GOOGLE_API_KEY)
-- "surf": Custom OpenAI-compatible endpoint (requires SURF_API_BASE and optionally SURF_API_KEY)
-- "openai": OpenAI models (requires OPENAI_API_KEY)
+Supported LLM providers (set ``LLM_PROVIDER``):
+
+- ``google`` — Gemini via ``langchain_google_genai`` (``GOOGLE_API_KEY``, optional ``LLM_MODEL``).
+- ``openai`` — OpenAI Chat Completions (``OPENAI_API_KEY``, optional ``OPENAI_API_BASE`` for proxies/Azure-style base URLs, optional ``LLM_MODEL``).
+- ``qwen`` — OpenAI-compatible API (``QWEN_API_BASE``, ``QWEN_API_KEY``, optional ``LLM_MODEL``), e.g. DashScope compatible-mode.
+- ``surf`` — Custom OpenAI-compatible endpoint (``SURF_API_BASE``, ``SURF_API_KEY``).
+
+Switching models: set ``LLM_PROVIDER`` and ``LLM_MODEL`` (and the matching API key / base URL), then restart the process or reload the package.
 """
 import os
 from typing import Optional, Any
@@ -17,13 +21,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _env_strip(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Read env var and strip whitespace (handles `KEY = value` in .env)."""
+    v = os.getenv(name, default)
+    if v is None:
+        return None
+    return v.strip() or None
+
+
 # =============================================================================
 # LLM PROVIDER CONFIGURATION
 # =============================================================================
 
 # LLM Provider: "google", "surf", "openai", "qwen"
 # Can be overridden by environment variable: LLM_PROVIDER
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google")
+LLM_PROVIDER = (_env_strip("LLM_PROVIDER", "google") or "google").lower()
 
 # Provider-specific configurations
 PROVIDER_CONFIGS = {
@@ -57,7 +69,7 @@ PROVIDER_CONFIGS = {
 
 # Default model - uses provider's default if not specified
 # Can be overridden by environment variable: LLM_MODEL
-DEFAULT_MODEL = os.getenv("LLM_MODEL", None)  # None means use provider default
+DEFAULT_MODEL = _env_strip("LLM_MODEL", None)  # None means use provider default
 
 # Default temperature for planning (lower = more deterministic)
 # Can be overridden by environment variable: LLM_TEMPERATURE_PLANNING
@@ -74,19 +86,20 @@ PLAYER_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE_PLAYER", "0.0"))
 # PROVIDER-SPECIFIC API KEYS AND ENDPOINTS
 # =============================================================================
 
-# Google
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+# Google (Gemini)
+GOOGLE_API_KEY = _env_strip("GOOGLE_API_KEY")
 
 # Surf (custom OpenAI-compatible endpoint)
-SURF_API_BASE = os.getenv("SURF_API_BASE")  # e.g., "http://localhost:8000/v1"
-SURF_API_KEY = os.getenv("SURF_API_KEY")  # Required for Surf provider
+SURF_API_BASE = _env_strip("SURF_API_BASE")
+SURF_API_KEY = _env_strip("SURF_API_KEY")
 
-# Qwen (OpenAI-compatible endpoint)
-QWEN_API_BASE = os.getenv("QWEN_API_BASE")  # e.g., "http://localhost:8000/v1"
-QWEN_API_KEY = os.getenv("QWEN_API_KEY")
+# Qwen (OpenAI-compatible endpoint, e.g. Alibaba DashScope compatible-mode)
+QWEN_API_BASE = _env_strip("QWEN_API_BASE")
+QWEN_API_KEY = _env_strip("QWEN_API_KEY")
 
-# OpenAI
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# OpenAI (optional base URL for Azure-style / corporate proxy endpoints)
+OPENAI_API_KEY = _env_strip("OPENAI_API_KEY")
+OPENAI_API_BASE = _env_strip("OPENAI_API_BASE")
 
 
 # =============================================================================
@@ -106,6 +119,30 @@ DEFAULT_METADATA_STANDARD = os.getenv("DEFAULT_METADATA_STANDARD", "basic")
 # LLM FACTORY
 # =============================================================================
 
+# Normalize common alternate spellings to DashScope model id (dot form).
+_QWEN_MODEL_ALIASES = {
+    "qwen3-5-flash": "qwen3.5-flash",
+    "qwen3-5-flash-preview": "qwen3.5-flash",
+    "qwen_qwen3-5-flash": "qwen3.5-flash",
+    "qwen_qwen3.5-flash": "qwen3.5-flash",
+}
+
+
+def structured_output_kwargs(provider: Optional[str] = None) -> dict:
+    """
+    Extra kwargs for ``ChatModel.with_structured_output(schema, **kwargs)``.
+
+    Strict schema mode is preferred for Pydantic-backed extraction:
+    - method="json_schema"
+    - strict=True
+    """
+    _ = (provider or LLM_PROVIDER).lower()
+    return {
+        "method": "json_schema",
+        "strict": True,
+    }
+
+
 def get_model_name(override: Optional[str] = None) -> str:
     """
     Get the model name to use.
@@ -116,10 +153,17 @@ def get_model_name(override: Optional[str] = None) -> str:
     3. Provider's default model
     """
     if override:
-        return override
-    if DEFAULT_MODEL:
-        return DEFAULT_MODEL
-    return PROVIDER_CONFIGS.get(LLM_PROVIDER, {}).get("default_model", "gpt-4o-mini")
+        model = override
+    elif DEFAULT_MODEL:
+        model = DEFAULT_MODEL
+    else:
+        model = PROVIDER_CONFIGS.get(LLM_PROVIDER, {}).get("default_model", "gpt-4o-mini")
+
+    if LLM_PROVIDER == "qwen":
+        key = str(model).strip().lower()
+        return _QWEN_MODEL_ALIASES.get(key, model)
+
+    return model
 
 
 def create_llm(
@@ -195,6 +239,7 @@ def create_llm(
             model=model,
             temperature=temperature,
             openai_api_key=OPENAI_API_KEY,
+            openai_api_base=OPENAI_API_BASE,
             **kwargs
         )
     

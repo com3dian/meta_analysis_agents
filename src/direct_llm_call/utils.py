@@ -17,18 +17,53 @@ from src.config import (
     LLM_PROVIDER,
     GOOGLE_API_KEY,
     OPENAI_API_KEY,
+    OPENAI_API_BASE,
     SURF_API_BASE,
     SURF_API_KEY,
     QWEN_API_BASE,
     QWEN_API_KEY,
     PROVIDER_CONFIGS,
     get_model_name,
+    structured_output_kwargs,
 )
 
 from .schemas import create_extraction_schema
 
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _ensure_json_keyword_for_structured_prompt(prompt: str) -> str:
+    """
+    Some OpenAI-compatible backends reject `response_format=json_object`
+    unless the prompt/messages explicitly contain the word "json".
+    """
+    text = prompt or ""
+    if "json" in text.lower():
+        return text
+    return (
+        "IMPORTANT: Return a valid JSON object that matches the schema.\n\n"
+        + text
+    )
+
+
+def _ensure_top_level_records_wrapper(prompt: str, records_key: str) -> str:
+    """
+    Reinforce that output must be a JSON object with the expected top-level key.
+
+    This is especially important for `json_mode` providers (e.g., some
+    OpenAI-compatible Qwen endpoints), which may otherwise return a bare array.
+    """
+    text = prompt or ""
+    marker = f"\"{records_key}\""
+    if marker in text or f"`{records_key}`" in text:
+        return text
+    return (
+        f"IMPORTANT: Return a top-level JSON object with key "
+        f"\"{records_key}\" only, e.g. {{\"{records_key}\": [ ... ]}}. "
+        f"Do NOT return a bare array.\n\n"
+        + text
+    )
 
 
 def read_markdown_file(file_path: str) -> str:
@@ -94,7 +129,9 @@ def create_llm_with_structured_output(
             temperature=temperature,
             google_api_key=GOOGLE_API_KEY,
         )
-        return llm.with_structured_output(output_schema)
+        return llm.with_structured_output(
+            output_schema, **structured_output_kwargs(provider)
+        )
     
     elif provider == "openai":
         from langchain_openai import ChatOpenAI
@@ -108,8 +145,11 @@ def create_llm_with_structured_output(
             model=model,
             temperature=temperature,
             openai_api_key=OPENAI_API_KEY,
+            openai_api_base=OPENAI_API_BASE,
         )
-        return llm.with_structured_output(output_schema)
+        return llm.with_structured_output(
+            output_schema, **structured_output_kwargs(provider)
+        )
     
     elif provider == "surf":
         from langchain_openai import ChatOpenAI
@@ -131,7 +171,9 @@ def create_llm_with_structured_output(
             openai_api_key=SURF_API_KEY,
             openai_api_base=SURF_API_BASE,
         )
-        return llm.with_structured_output(output_schema)
+        return llm.with_structured_output(
+            output_schema, **structured_output_kwargs(provider)
+        )
     
     elif provider == "qwen":
         from langchain_openai import ChatOpenAI
@@ -153,7 +195,9 @@ def create_llm_with_structured_output(
             openai_api_key=QWEN_API_KEY,
             openai_api_base=QWEN_API_BASE,
         )
-        return llm.with_structured_output(output_schema)
+        return llm.with_structured_output(
+            output_schema, **structured_output_kwargs(provider)
+        )
     
     else:
         available = list(PROVIDER_CONFIGS.keys())
@@ -224,6 +268,7 @@ def invoke_llm_with_structured_output(
     model_name: Optional[str] = None,
     temperature: float = 0.0,
     provider: Optional[str] = None,
+    records_key: Optional[str] = None,
 ) -> T:
     """
     Invoke an LLM with a prompt and return structured output.
@@ -236,7 +281,10 @@ def invoke_llm_with_structured_output(
         model_name: Optional model name override
         temperature: LLM temperature (default: 0.0 for deterministic output)
         provider: Optional provider override (google, openai, surf, qwen)
-        
+        records_key: When set, reinforce top-level JSON object shape (see
+            ``_ensure_top_level_records_wrapper``). Use the wrapper model's list
+            field name (e.g. ``yield_records``, ``facts``).
+
     Returns:
         An instance of the output_schema populated with the LLM's response
     """
@@ -247,6 +295,9 @@ def invoke_llm_with_structured_output(
         provider=provider,
     )
     
+    prompt = _ensure_json_keyword_for_structured_prompt(prompt)
+    if records_key:
+        prompt = _ensure_top_level_records_wrapper(prompt, records_key)
     return llm.invoke(prompt)
 
 
@@ -289,6 +340,8 @@ def invoke_with_schema(
         records_key=records_key,
     )
     
+    prompt = _ensure_json_keyword_for_structured_prompt(prompt)
+    prompt = _ensure_top_level_records_wrapper(prompt, records_key)
     return llm.invoke(prompt)
 
 

@@ -10,7 +10,9 @@ This module implements the core logic for executing a single plan step:
 The execution flow is:
     execute_parallel → critique → revise → [loop or synthesize]
 """
+import json
 import logging
+import re
 from typing import Dict, Any, List, Optional, Type
 
 from pydantic import BaseModel
@@ -20,6 +22,76 @@ from langgraph.graph import StateGraph, END
 from src.core.state import StepExecutionState, PlayerResult, DebateEntry
 from ..players import Player, create_player_from_config, PLAYER_CONFIGS
 from .utils import filter_objective_by_sections, get_labeling_objective
+
+
+def _baseline_yield_record_count(workspace: Dict[str, Any]) -> Optional[int]:
+    """
+    Count rows in workspace['direct_records'] (yield_records / records) so record_extractor
+    synthesis can enforce list cardinality. Returns None if unknown (e.g. markdown table).
+    """
+    dr = workspace.get("direct_records")
+    if dr is None:
+        return None
+
+    def _len_from_dict(obj: Dict[str, Any]) -> Optional[int]:
+        yr = obj.get("yield_records")
+        if yr is None:
+            yr = obj.get("records")
+        if isinstance(yr, list):
+            return len(yr)
+        return None
+
+    if isinstance(dr, dict):
+        n = _len_from_dict(dr)
+        if n is not None:
+            return n
+
+    if hasattr(dr, "model_dump"):
+        try:
+            dumped = dr.model_dump(by_alias=True)
+            if isinstance(dumped, dict):
+                n = _len_from_dict(dumped)
+                if n is not None:
+                    return n
+        except Exception:
+            pass
+
+    if not isinstance(dr, str):
+        return None
+
+    s = dr.strip()
+    if s.startswith("|") and "\n|" in s[:500]:
+        return None
+
+    def _try_parse(blob: str) -> Optional[int]:
+        blob = blob.strip()
+        try:
+            parsed = json.loads(blob)
+        except Exception:
+            return None
+        if isinstance(parsed, dict):
+            return _len_from_dict(parsed)
+        if isinstance(parsed, list) and parsed and all(isinstance(x, dict) for x in parsed):
+            return len(parsed)
+        return None
+
+    n = _try_parse(s)
+    if n is not None:
+        return n
+
+    m = re.search(r"\{[\s\S]*\}", s)
+    if m:
+        n = _try_parse(m.group(0))
+        if n is not None:
+            return n
+
+    m = re.search(r"\[[\s\S]*\]", s)
+    if m:
+        n = _try_parse(m.group(0))
+        if n is not None:
+            return n
+
+    return None
 
 
 # ===================================================================
@@ -221,6 +293,7 @@ def synthesize_node(state: StepExecutionState) -> Dict[str, Any]:
         
         # Include schema from workspace if available for synthesis
         workspace = state.get("workspace", {})
+        synth_insert_pos = 0
         if "meta_analytic_schema" in workspace:
             schema_content = workspace["meta_analytic_schema"]
             # Add schema as a special entry in results for synthesis
@@ -229,11 +302,28 @@ def synthesize_node(state: StepExecutionState) -> Dict[str, Any]:
                 "analysis": f"**META-ANALYTIC SCHEMA (CRITICAL - USE THESE EXACT FIELD NAMES):**\n{schema_content}\n\n**IMPORTANT**: All meta-analytic records MUST use exactly these field names. Do NOT invent new field names.",
                 "tool_results": {}
             })
-        
+            synth_insert_pos = 1
+
+        baseline_record_count: Optional[int] = None
+        if synthesizer is not None and synthesizer.name == "record_extractor":
+            baseline_record_count = _baseline_yield_record_count(workspace)
+            if baseline_record_count is not None and baseline_record_count > 0:
+                results_for_synthesis.insert(synth_insert_pos, {
+                    "player": "record_cardinality_constraint",
+                    "analysis": (
+                        f"**NON-NEGOTIABLE:** `direct_records` baseline has **{baseline_record_count}** "
+                        "experiment rows. The final structured record list MUST have **at least** that "
+                        "many elements, same baseline order for those positions (refine in place). "
+                        "Do not merge into one summary record."
+                    ),
+                    "tool_results": {},
+                })
+
         consolidated = synthesizer.synthesize_results(
             task=task,
             all_results=results_for_synthesis,
-            output_schema=output_schema
+            output_schema=output_schema,
+            baseline_record_count=baseline_record_count,
         )
         
         if output_schema and isinstance(consolidated, BaseModel):
@@ -352,18 +442,33 @@ def create_step_state(
     """
     Create the initial state for executing a step.
     """
-    # Logical player role for this step (e.g., "labeller", "schema_reasoner").
-    # Stored in the state for logging/metadata; individual Player instances
-    # created below are named with an index suffix (role_1, role_2, ...).
+    # The plan assigns a specific player role to each step — use it.
+    # Fall back to pool[0] only if the assigned role is missing from PLAYER_CONFIGS.
     player_name = step_dict.get("player", "")
 
     players = []
-    for i in range(min(players_per_step, len(player_pool))):
-        role_name = player_pool[i % len(player_pool)]
-        config = PLAYER_CONFIGS.get(role_name, {})
-        player = create_player_from_config(config, name=f"{role_name}_{i+1}")
-        players.append(player)
-    
+    if player_name and player_name in PLAYER_CONFIGS:
+        # Primary player: the role the planner chose for this step.
+        config = PLAYER_CONFIGS[player_name]
+        players.append(create_player_from_config(config, name=player_name))
+        # If more players are requested (debate topology), draw the rest from the pool.
+        for i in range(1, players_per_step):
+            role_name = player_pool[i % len(player_pool)]
+            config = PLAYER_CONFIGS.get(role_name, {})
+            players.append(create_player_from_config(config, name=f"{role_name}_{i+1}"))
+    else:
+        # Fallback: planner gave an unknown/missing role — use the pool as before.
+        logging.warning(
+            f"Step {step_dict.get('task','?')!r}: assigned player {player_name!r} "
+            f"not found in PLAYER_CONFIGS; falling back to player pool."
+        )
+        for i in range(min(players_per_step, len(player_pool))):
+            role_name = player_pool[i % len(player_pool)]
+            config = PLAYER_CONFIGS.get(role_name, {})
+            players.append(create_player_from_config(config, name=f"{role_name}_{i+1}"))
+
+    # The synthesizer consolidates results; use the assigned player so the same
+    # expertise is applied during synthesis as during execution.
     synthesizer = players[0] if players else None
     
     target_resources = step_dict.get("target_resources", [])

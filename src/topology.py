@@ -76,4 +76,18 @@ EXECUTION_TOPOLOGIES: Dict[str, Dict[str, Any]] = {
         "debate_rounds": 0,
         "player_pool": ["value_identifier"],
     },
+    "pipeline": {
+        "description": (
+            "Sequential 4-step pipeline with no debate. "
+            "Uses value_identifier → labeller → direct_extractor → record_extractor."
+        ),
+        "players_per_step": 1,
+        "debate_rounds": 0,
+        "player_pool": [
+            "value_identifier",
+            "labeller",
+            "direct_extractor",
+            "record_extractor",
+        ],
+    },
 }
