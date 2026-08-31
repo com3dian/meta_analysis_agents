@@ -3,14 +3,16 @@ Static workflows over paper text:
 
 **``workflow=\"facts\"`` (default)** — SPO facts → optional facts→schema LLM.
 
-**``workflow=\"label_then_direct\"``** — (1) Single LLM call outputs the **full paper text**
-with inline ``<FieldName>value</FieldName>`` tags (no separate tagging tool). (2) Second LLM
-uses the direct-LLM extraction prompt family plus optional **completeness** instructions.
+**``workflow=\"label_then_direct\"``** — (1) Single LLM call outputs **only relevant
+paragraphs/table blocks** with inline ``<FieldName>value</FieldName>`` tags (drops
+unrelated text to keep step-1 output small/fast). (2) Second LLM uses the direct-LLM
+extraction prompt family plus optional **completeness** instructions.
 """
 
 import json
 import logging
 import re
+import time
 from typing import List, Tuple, Optional, Dict, Any, Union, Type, Literal
 
 import pandas as pd
@@ -93,15 +95,16 @@ class FieldValuePairsExtraction(BaseModel):
 
 class LabeledPaperOutput(BaseModel):
     """
-    Step-1 labeller output: the **entire** paper as one string with inline XML tags.
-    No deterministic tagging tool — the model returns tagged text directly.
+    Step-1 labeller output: schema-relevant paragraphs/blocks only, with inline XML tags.
+    Unrelated text is omitted to keep the response short and speed up step 1.
     """
 
     labeled_document: str = Field(
         ...,
         description=(
-            "Full document text with inline <SchemaFieldName>verbatim span</SchemaFieldName> "
-            "for each schema-relevant value found. Must preserve the source text; do not summarize."
+            "Concatenation of ONLY paragraphs/table blocks that contain schema-relevant "
+            "evidence, each with inline <SchemaFieldName>verbatim span</SchemaFieldName> "
+            "tags. Omit unrelated sections. Do not invent text; copy verbatim from source."
         ),
     )
 
@@ -135,27 +138,44 @@ Return ONLY structured data according to the provided schema.
 
 LABELLER_DOCUMENT_PROMPT_TEMPLATE = """You are a document labeller for downstream structured extraction.
 
-**Task:** Produce a single field `labeled_document`: the **complete** input document, **reproduced in full**, with inline XML so step 2 can emit **one output record per experimental row** where possible.
+**Task:** Produce a single field `labeled_document` containing **ONLY** the paragraphs,
+table blocks, captions, and footnotes that hold schema-relevant evidence. Drop all other
+text (intro fluff, unrelated discussion, references, acknowledgements, etc.). Within each
+kept block, add inline XML tags so step 2 can emit **one output record per experimental row**.
 
 **Schema fields — tag names must match EXACTLY (use these as XML element names):**
 {schema_descriptions}
 
-**Tagging rules (maximize coverage for recall):**
-- Preserve the document **verbatim** — no shortening, no summarizing, no skipped tables.
-- Wrap **every** schema-relevant number or label as `<FieldName>exact substring from source</FieldName>`.
-- **Tables:** tag **each cell** that maps to a field — especially **each row** of yield/density/input tables (same field name may appear many times for different rows). If a table has columns for species 1, species 2, intercrop yields, tag **each numeric cell** with the correct field name.
-- **Years, treatments, N levels:** tag distinct values so rows can be split downstream (e.g. year in each row, treatment labels).
-- Do not invent text; only wrap spans that exist.
-- Keep markdown/table structure.
+**What to KEEP (include the whole paragraph or whole table block if it contains any of these):**
+- Yield / density / nutrient / design / crop / site / year / treatment values
+- Results tables and their captions/footnotes (keep the full table, not a summary)
+- Methods sentences that state densities, N/P/K inputs, design, sowing/harvest dates, lat/lon
+- Any sentence with a schema-relevant number or label
 
-**Why:** Sparse tags → few records downstream. **Dense, row-level tags** → complete extraction.
+**What to DROP:**
+- Sections with no schema-relevant values (pure background, literature review without numbers,
+  acknowledgements, references, unrelated discussion)
+- Do **not** rewrite or paraphrase kept text — copy the source wording; only add XML tags
+
+**Tagging rules (maximize coverage for recall on kept text):**
+- Wrap **every** schema-relevant number or label as `<FieldName>exact substring from source</FieldName>`.
+- **Tables:** tag **each cell** that maps to a field — especially **each row** of yield/density/input
+  tables (same field name may appear many times for different rows).
+- **Years, treatments, N levels:** tag distinct values so rows can be split downstream.
+- Do not invent text; only wrap spans that exist.
+- Keep markdown/table structure inside kept blocks.
+- Separate kept blocks with a blank line.
+
+**Why:** Returning only relevant blocks makes step 1 much faster. Dense, row-level tags on those
+blocks still allow complete extraction in step 2.
 
 **Input document:**
 \"\"\"
 {text}
 \"\"\"
 
-Return ONLY structured data: one object with `labeled_document` = full tagged text.
+Return ONLY structured data: one object with `labeled_document` = tagged relevant blocks only
+(not the full paper).
 """
 
 
@@ -455,19 +475,24 @@ def llm_produce_labeled_paper_text(
 ) -> LabeledPaperOutput:
     """
     Step 1 for ``label_then_direct``: a **single** structured LLM call whose output is only
-    ``labeled_document`` — the full paper text with inline ``<FieldName>…</FieldName>`` tags.
-
-    No intermediate (field, value) list and no :func:`apply_xml_tags_to_content` tool; the model
-    returns the tagged document directly.
+    ``labeled_document`` — **relevant paragraphs/table blocks** with inline
+    ``<FieldName>…</FieldName>`` tags (unrelated text omitted for speed).
     """
+    t0 = time.perf_counter()
     logger.info(
-        "llm_produce_labeled_paper_text: starting (text_len=%d)",
+        "static_workflow step 1/2 (label relevant blocks): starting LLM call "
+        "(input_chars=%d) — output should be much shorter than the full paper",
         len(text),
     )
     schema_descriptions = _format_schema_descriptions(dataset_standard)
     prompt = LABELLER_DOCUMENT_PROMPT_TEMPLATE.format(
         text=text,
         schema_descriptions=schema_descriptions,
+    )
+    logger.info(
+        "static_workflow step 1/2 (label relevant blocks): prompt ready "
+        "(prompt_chars=%d); calling LLM…",
+        len(prompt),
     )
     result = invoke_llm_with_structured_output(
         prompt=prompt,
@@ -477,9 +502,24 @@ def llm_produce_labeled_paper_text(
         provider=provider,
         records_key=None,
     )
+    elapsed = time.perf_counter() - t0
+    if result is None:
+        logger.error(
+            "static_workflow step 1/2 (label relevant blocks): FAILED after %.1fs "
+            "(LLM returned None)",
+            elapsed,
+        )
+        raise RuntimeError(
+            "static_workflow step 1 (label relevant blocks) returned None from the LLM"
+        )
+    labeled_len = len(getattr(result, "labeled_document", None) or "")
+    ratio = (labeled_len / len(text)) if text else 0.0
     logger.info(
-        "llm_produce_labeled_paper_text: done (labeled_document len=%d)",
-        len(result.labeled_document or ""),
+        "static_workflow step 1/2 (label relevant blocks): done in %.1fs "
+        "(labeled_chars=%d, %.0f%% of input)",
+        elapsed,
+        labeled_len,
+        100.0 * ratio,
     )
     return result
 
@@ -558,8 +598,15 @@ def llm_extract_records_from_tagged_paper(
     When ``step2_maximize_completeness`` is True, appends :func:`append_record_completeness_instructions`
     so the model prioritizes emitting all supported records.
     """
+    t0 = time.perf_counter()
     doc = labeled_text
     if len(doc) > labeled_text_max_chars:
+        logger.info(
+            "static_workflow step 2/2 (extract records): truncating labeled text "
+            "%d → %d chars",
+            len(doc),
+            labeled_text_max_chars,
+        )
         doc = _truncate_document_for_prompt(doc, max_chars=labeled_text_max_chars)
 
     if prompt_style == "direct_simple":
@@ -581,12 +628,12 @@ def llm_extract_records_from_tagged_paper(
         prompt = append_record_completeness_instructions(prompt)
 
     logger.info(
-        "llm_extract_records_from_tagged_paper: prompt_style=%s include_tag_note=%s "
-        "completeness=%s prompt_len=%d",
+        "static_workflow step 2/2 (extract records): starting LLM call "
+        "(prompt_style=%s completeness=%s prompt_chars=%d labeled_chars=%d)",
         prompt_style,
-        include_tag_note,
         step2_maximize_completeness,
         len(prompt),
+        len(doc),
     )
 
     result = invoke_with_schema(
@@ -599,8 +646,21 @@ def llm_extract_records_from_tagged_paper(
         output_class_name=output_class_name,
         records_key=records_key,
     )
-    nrec = len(getattr(result, records_key, []))
-    logger.info("llm_extract_records_from_tagged_paper: completed (num_records=%d)", nrec)
+    elapsed = time.perf_counter() - t0
+    if result is None:
+        logger.error(
+            "static_workflow step 2/2 (extract records): FAILED after %.1fs (LLM returned None)",
+            elapsed,
+        )
+        raise RuntimeError(
+            "static_workflow step 2 (extract records) returned None from the LLM"
+        )
+    nrec = len(getattr(result, records_key, []) or [])
+    logger.info(
+        "static_workflow step 2/2 (extract records): done in %.1fs (num_records=%d)",
+        elapsed,
+        nrec,
+    )
     return result
 
 
@@ -758,9 +818,9 @@ def run_two_step_text_to_dataset(
     ``workflow=\"facts\"`` (default): SPO facts → optional facts→schema LLM.
 
     ``workflow=\"label_then_direct\"``: (1) :func:`llm_produce_labeled_paper_text` — one LLM call
-    returns the **full** paper string with inline XML tags only (no pair list, no tagging tool).
-    (2) :func:`llm_extract_records_from_tagged_paper` — direct-LLM-style prompt on that string
-    via :func:`invoke_with_schema`, with optional completeness appendix.
+    returns **relevant paragraphs/table blocks only** with inline XML tags (unrelated text
+    dropped for speed). (2) :func:`llm_extract_records_from_tagged_paper` — direct-LLM-style
+    prompt on that string via :func:`invoke_with_schema`, with optional completeness appendix.
 
     For ``label_then_direct``, ``dataset_standard`` is required; ``use_llm_dataset_builder`` is ignored.
     """
@@ -776,6 +836,13 @@ def run_two_step_text_to_dataset(
         if dataset_standard is None:
             raise ValueError("dataset_standard is required when workflow='label_then_direct'")
 
+        t_workflow = time.perf_counter()
+        logger.info(
+            "static_workflow label_then_direct: BEGIN "
+            "(2 LLM calls; step 1 = tag relevant paragraphs only, "
+            "step 2 = record extraction)"
+        )
+
         label_step1 = llm_produce_labeled_paper_text(
             text=text,
             dataset_standard=dataset_standard,
@@ -785,7 +852,15 @@ def run_two_step_text_to_dataset(
         )
         labeled_text = (label_step1.labeled_document or "").strip()
         if not labeled_text:
-            logger.warning("run_two_step_text_to_dataset: labeled_document empty from step 1")
+            logger.warning(
+                "static_workflow: step 1 finished but labeled_document is empty"
+            )
+        else:
+            logger.info(
+                "static_workflow: step 1 complete → starting step 2 "
+                "(labeled_chars=%d)",
+                len(labeled_text),
+            )
 
         schema_output = llm_extract_records_from_tagged_paper(
             labeled_text=labeled_text,
@@ -801,15 +876,20 @@ def run_two_step_text_to_dataset(
             temperature=temperature,
             provider=provider,
         )
+        logger.info("static_workflow: building DataFrame from schema_output…")
         df = build_dataset_from_schema_output(
             schema_output, records_key=dataset_records_key
         )
         ok, issues = validate_schema_records_dataset(df)
 
+        elapsed = time.perf_counter() - t_workflow
         logger.info(
-            "run_two_step_text_to_dataset: label_then_direct done (labeled_len=%d, rows=%d)",
+            "static_workflow label_then_direct: END in %.1fs "
+            "(labeled_chars=%d, rows=%d, validation_ok=%s)",
+            elapsed,
             len(labeled_text),
             len(df),
+            ok,
         )
         return {
             "workflow": workflow,

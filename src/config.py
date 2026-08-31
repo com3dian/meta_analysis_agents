@@ -9,7 +9,7 @@ Supported LLM providers (set ``LLM_PROVIDER``):
 - ``google`` — Gemini via ``langchain_google_genai`` (``GOOGLE_API_KEY``, optional ``LLM_MODEL``).
 - ``openai`` — OpenAI Chat Completions (``OPENAI_API_KEY``, optional ``OPENAI_API_BASE`` for proxies/Azure-style base URLs, optional ``LLM_MODEL``).
 - ``qwen`` — OpenAI-compatible API (``QWEN_API_BASE``, ``QWEN_API_KEY``, optional ``LLM_MODEL``), e.g. DashScope compatible-mode.
-- ``surf`` — Custom OpenAI-compatible endpoint (``SURF_API_BASE``, ``SURF_API_KEY``).
+- ``surf`` — SURF Willma (OpenAI-compatible; ``SURF_API_KEY``, optional ``SURF_API_BASE``).
 
 Switching models: set ``LLM_PROVIDER`` and ``LLM_MODEL`` (and the matching API key / base URL), then restart the process or reload the package.
 """
@@ -45,10 +45,10 @@ PROVIDER_CONFIGS = {
         "description": "Google Gemini models",
     },
     "surf": {
-        "default_model": "Qwen2.5-Coder-7B-Instruct",
+        "default_model": "default-text-large",
         "api_key_env": "SURF_API_KEY",
         "base_url_env": "SURF_API_BASE",
-        "description": "Custom OpenAI-compatible endpoint (e.g., vLLM, TGI)",
+        "description": "SURF Willma (OpenAI-compatible chat completions)",
     },
     "openai": {
         "default_model": "gpt-4o-mini",
@@ -81,6 +81,10 @@ PLANNING_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE_PLANNING", "0.0"))
 # Can be overridden by environment variable: LLM_TEMPERATURE_PLAYER
 PLAYER_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE_PLAYER", "0.0"))
 
+# Per-request LLM timeout (seconds). Willma calls can be slow on large papers.
+# Can be overridden by environment variable: LLM_REQUEST_TIMEOUT
+LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "180"))
+
 
 # =============================================================================
 # PROVIDER-SPECIFIC API KEYS AND ENDPOINTS
@@ -89,9 +93,11 @@ PLAYER_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE_PLAYER", "0.0"))
 # Google (Gemini)
 GOOGLE_API_KEY = _env_strip("GOOGLE_API_KEY")
 
-# Surf (custom OpenAI-compatible endpoint)
-SURF_API_BASE = _env_strip("SURF_API_BASE")
+# Surf / Willma (OpenAI-compatible). Default base is the public Willma API.
+DEFAULT_SURF_API_BASE = "https://willma.surf.nl/api/v0"
+SURF_API_BASE = (_env_strip("SURF_API_BASE") or DEFAULT_SURF_API_BASE).rstrip("/")
 SURF_API_KEY = _env_strip("SURF_API_KEY")
+SURF_ENABLE_THINKING = os.getenv("SURF_ENABLE_THINKING", "false").lower() == "true"
 
 # Qwen (OpenAI-compatible endpoint, e.g. Alibaba DashScope compatible-mode)
 QWEN_API_BASE = _env_strip("QWEN_API_BASE")
@@ -132,38 +138,74 @@ def structured_output_kwargs(provider: Optional[str] = None) -> dict:
     """
     Extra kwargs for ``ChatModel.with_structured_output(schema, **kwargs)``.
 
-    Strict schema mode is preferred for Pydantic-backed extraction:
-    - method="json_schema"
-    - strict=True
+    Google / OpenAI prefer strict JSON Schema. Willma (vLLM) typically does
+    not support OpenAI ``json_schema`` + ``strict``; use ``json_mode`` instead
+    (the prompt helpers already inject the word "json").
     """
-    _ = (provider or LLM_PROVIDER).lower()
+    p = (provider or LLM_PROVIDER).lower()
+    if p == "surf":
+        return {"method": "json_mode"}
     return {
         "method": "json_schema",
         "strict": True,
     }
 
 
-def get_model_name(override: Optional[str] = None) -> str:
+def iter_structured_output_kwargs(provider: Optional[str] = None) -> list:
+    """Preferred structured-output kwargs, then Willma-compatible fallbacks."""
+    p = (provider or LLM_PROVIDER).lower()
+    primary = structured_output_kwargs(p)
+    if p != "surf":
+        return [primary]
+    fallbacks = (
+        primary,
+        {"method": "json_mode"},
+        {"method": "function_calling"},
+        {},
+    )
+    seen: list = []
+    for kw in fallbacks:
+        if kw not in seen:
+            seen.append(kw)
+    return seen
+
+
+def get_model_name(
+    override: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> str:
     """
     Get the model name to use.
-    
+
     Priority:
     1. Override parameter
     2. LLM_MODEL environment variable
     3. Provider's default model
     """
+    provider = (provider or LLM_PROVIDER).lower()
     if override:
         model = override
     elif DEFAULT_MODEL:
         model = DEFAULT_MODEL
     else:
-        model = PROVIDER_CONFIGS.get(LLM_PROVIDER, {}).get("default_model", "gpt-4o-mini")
+        model = PROVIDER_CONFIGS.get(provider, {}).get("default_model", "gpt-4o-mini")
 
-    if LLM_PROVIDER == "qwen":
+    if provider == "qwen":
         key = str(model).strip().lower()
         return _QWEN_MODEL_ALIASES.get(key, model)
 
     return model
+
+
+def _surf_extra_body(model: str, extra: Optional[dict] = None) -> dict:
+    """Willma extra_body: disable thinking unless SURF_ENABLE_THINKING is set."""
+    extra_body = dict(extra or {})
+    # Mistral tokenizers reject chat_template_kwargs on Willma/SURF.
+    if "mistral" not in model.lower() and "devstral" not in model.lower():
+        chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+        chat_template_kwargs.setdefault("enable_thinking", SURF_ENABLE_THINKING)
+        extra_body["chat_template_kwargs"] = chat_template_kwargs
+    return extra_body
 
 
 def create_llm(
@@ -174,75 +216,79 @@ def create_llm(
 ) -> Any:
     """
     Factory function to create an LLM instance based on the configured provider.
-    
+
     Args:
         model_name: Model name (uses default if not specified)
         temperature: LLM temperature
         provider: Override the default provider
         **kwargs: Additional arguments passed to the LLM constructor
-        
+
     Returns:
         LangChain chat model instance
-        
+
     Raises:
         ValueError: If provider is not supported or required config is missing
     """
-    provider = provider or LLM_PROVIDER
-    model = get_model_name(model_name)
-    
+    provider = (provider or LLM_PROVIDER).lower()
+    model = get_model_name(model_name, provider=provider)
+
     if provider == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
-        
+
         if not GOOGLE_API_KEY:
             raise ValueError(
                 "GOOGLE_API_KEY not found. Set it in your .env file."
             )
-        
+
         return ChatGoogleGenerativeAI(
             model=model,
             temperature=temperature,
             google_api_key=GOOGLE_API_KEY,
             **kwargs
         )
-    
+
     elif provider == "surf":
         from langchain_openai import ChatOpenAI
-        
-        if not SURF_API_BASE:
-            raise ValueError(
-                "SURF_API_BASE not found. Set it in your .env file.\n"
-                "Example: SURF_API_BASE=http://localhost:8000/v1"
-            )
-        
+
         if not SURF_API_KEY:
             raise ValueError(
-                "SURF_API_KEY not found. Set it in your .env file."
+                "SURF_API_KEY not found. Set it in your .env file.\n"
+                "Get a key at https://willma.surf.nl and set SURF_API_KEY=..."
             )
-        
+
+        extra_body = _surf_extra_body(model, kwargs.pop("extra_body", None))
+        default_headers = dict(kwargs.pop("default_headers", None) or {})
+        default_headers.setdefault("X-API-KEY", SURF_API_KEY)
+        timeout = kwargs.pop("request_timeout", kwargs.pop("timeout", LLM_REQUEST_TIMEOUT))
+
         return ChatOpenAI(
             model=model,
             temperature=temperature,
             openai_api_key=SURF_API_KEY,
             openai_api_base=SURF_API_BASE,
+            extra_body=extra_body or None,
+            default_headers=default_headers,
+            request_timeout=timeout,
             **kwargs
         )
-    
+
     elif provider == "openai":
         from langchain_openai import ChatOpenAI
-        
+
         if not OPENAI_API_KEY:
             raise ValueError(
                 "OPENAI_API_KEY not found. Set it in your .env file."
             )
-        
+
         return ChatOpenAI(
             model=model,
             temperature=temperature,
             openai_api_key=OPENAI_API_KEY,
             openai_api_base=OPENAI_API_BASE,
+            request_timeout=kwargs.pop("request_timeout", LLM_REQUEST_TIMEOUT),
             **kwargs
         )
-    
+
     elif provider == "qwen":
         from langchain_openai import ChatOpenAI
 
@@ -262,6 +308,7 @@ def create_llm(
             temperature=temperature,
             openai_api_key=QWEN_API_KEY,
             openai_api_base=QWEN_API_BASE,
+            request_timeout=kwargs.pop("request_timeout", LLM_REQUEST_TIMEOUT),
             **kwargs
         )
 
@@ -295,4 +342,5 @@ Player Temperature: {PLAYER_TEMPERATURE}
 Default Topology: {DEFAULT_TOPOLOGY}
 Default Metadata Standard: {DEFAULT_METADATA_STANDARD}
 API Key ({api_key_env}): {'Set' if api_key_set else 'Not Set'}
+SURF API Base: {SURF_API_BASE if LLM_PROVIDER == 'surf' else 'n/a'}
 """

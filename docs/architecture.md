@@ -331,10 +331,18 @@ src/
 
 ### Environment Variables
 
-Create a `.env` file in the project root:
+Create a `.env` file in the project root (see `.env.example`):
 
 ```
+# Google Gemini (default)
+LLM_PROVIDER=google
 GOOGLE_API_KEY=your_api_key_here
+
+# SURF Willma
+# LLM_PROVIDER=surf
+# SURF_API_KEY=your_willma_api_key
+# SURF_API_BASE=https://willma.surf.nl/api/v0
+# LLM_MODEL=default-text-large
 ```
 
 ### Adding New Data Source Types

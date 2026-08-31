@@ -24,6 +24,19 @@ Supported file types:
 - `.md`
 - `.txt`
 
+## LLM provider (SURF Willma)
+
+Set these in a project-root `.env` (copy from `.env.example`):
+
+```
+LLM_PROVIDER=surf
+SURF_API_KEY=your_willma_api_key
+SURF_API_BASE=https://willma.surf.nl/api/v0
+LLM_MODEL=default-text-large
+```
+
+`SURF_API_BASE` defaults to Willma if omitted. List models with `GET {SURF_API_BASE}/sequences` using header `X-API-KEY`. Restart the process after changing `.env`.
+
 ## Quick start (single paper)
 
 ```python

@@ -15,16 +15,11 @@ from pydantic import BaseModel
 # Import config from parent module
 from src.config import (
     LLM_PROVIDER,
-    GOOGLE_API_KEY,
-    OPENAI_API_KEY,
-    OPENAI_API_BASE,
-    SURF_API_BASE,
-    SURF_API_KEY,
-    QWEN_API_BASE,
-    QWEN_API_KEY,
     PROVIDER_CONFIGS,
+    create_llm,
     get_model_name,
     structured_output_kwargs,
+    iter_structured_output_kwargs,
 )
 
 from .schemas import create_extraction_schema
@@ -100,110 +95,28 @@ def create_llm_with_structured_output(
 ):
     """
     Create an LLM instance configured for structured output.
-    
+
     Args:
         output_schema: A Pydantic model class defining the expected output structure
         model_name: Optional model name override
         temperature: LLM temperature (default: 0.0 for deterministic output)
         provider: Optional provider override (google, openai, surf, qwen)
-        
+
     Returns:
         An LLM instance with structured output binding
-        
+
     Raises:
         ValueError: If provider is not supported or required config is missing
     """
     provider = provider or LLM_PROVIDER
-    model = get_model_name(model_name)
-    
-    if provider == "google":
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        
-        if not GOOGLE_API_KEY:
-            raise ValueError(
-                "GOOGLE_API_KEY not found. Set it in your .env file."
-            )
-        
-        llm = ChatGoogleGenerativeAI(
-            model=model,
-            temperature=temperature,
-            google_api_key=GOOGLE_API_KEY,
-        )
-        return llm.with_structured_output(
-            output_schema, **structured_output_kwargs(provider)
-        )
-    
-    elif provider == "openai":
-        from langchain_openai import ChatOpenAI
-        
-        if not OPENAI_API_KEY:
-            raise ValueError(
-                "OPENAI_API_KEY not found. Set it in your .env file."
-            )
-        
-        llm = ChatOpenAI(
-            model=model,
-            temperature=temperature,
-            openai_api_key=OPENAI_API_KEY,
-            openai_api_base=OPENAI_API_BASE,
-        )
-        return llm.with_structured_output(
-            output_schema, **structured_output_kwargs(provider)
-        )
-    
-    elif provider == "surf":
-        from langchain_openai import ChatOpenAI
-        
-        if not SURF_API_BASE:
-            raise ValueError(
-                "SURF_API_BASE not found. Set it in your .env file.\n"
-                "Example: SURF_API_BASE=http://localhost:8000/v1"
-            )
-        
-        if not SURF_API_KEY:
-            raise ValueError(
-                "SURF_API_KEY not found. Set it in your .env file."
-            )
-        
-        llm = ChatOpenAI(
-            model=model,
-            temperature=temperature,
-            openai_api_key=SURF_API_KEY,
-            openai_api_base=SURF_API_BASE,
-        )
-        return llm.with_structured_output(
-            output_schema, **structured_output_kwargs(provider)
-        )
-    
-    elif provider == "qwen":
-        from langchain_openai import ChatOpenAI
-        
-        if not QWEN_API_BASE:
-            raise ValueError(
-                "QWEN_API_BASE not found. Set it in your .env file.\n"
-                "Example: QWEN_API_BASE=http://localhost:8000/v1"
-            )
-        
-        if not QWEN_API_KEY:
-            raise ValueError(
-                "QWEN_API_KEY not found. Set it in your .env file."
-            )
-        
-        llm = ChatOpenAI(
-            model=model,
-            temperature=temperature,
-            openai_api_key=QWEN_API_KEY,
-            openai_api_base=QWEN_API_BASE,
-        )
-        return llm.with_structured_output(
-            output_schema, **structured_output_kwargs(provider)
-        )
-    
-    else:
-        available = list(PROVIDER_CONFIGS.keys())
-        raise ValueError(
-            f"Unknown LLM provider: '{provider}'. Available: {available}"
-        )
+    llm = create_llm(
+        model_name=model_name,
+        temperature=temperature,
+        provider=provider,
+    )
+    return llm.with_structured_output(
+        output_schema, **structured_output_kwargs(provider)
+    )
 
 
 def create_llm_for_schema(
@@ -288,17 +201,25 @@ def invoke_llm_with_structured_output(
     Returns:
         An instance of the output_schema populated with the LLM's response
     """
-    llm = create_llm_with_structured_output(
-        output_schema=output_schema,
+    llm = create_llm(
         model_name=model_name,
         temperature=temperature,
         provider=provider,
     )
-    
     prompt = _ensure_json_keyword_for_structured_prompt(prompt)
     if records_key:
         prompt = _ensure_top_level_records_wrapper(prompt, records_key)
-    return llm.invoke(prompt)
+
+    last_error: Optional[Exception] = None
+    for kwargs in iter_structured_output_kwargs(provider):
+        try:
+            bound = llm.with_structured_output(output_schema, **kwargs)
+            return bound.invoke(prompt)
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Structured output invocation failed with no error")
 
 
 def invoke_with_schema(
@@ -330,19 +251,20 @@ def invoke_with_schema(
     Returns:
         A Pydantic model instance populated with the LLM's response
     """
-    llm, _ = create_llm_for_schema(
-        schema=schema,
-        model_name=model_name,
-        temperature=temperature,
-        provider=provider,
+    output_schema = create_extraction_schema(
+        standard=schema,
         record_class_name=record_class_name,
         output_class_name=output_class_name,
         records_key=records_key,
     )
-    
-    prompt = _ensure_json_keyword_for_structured_prompt(prompt)
-    prompt = _ensure_top_level_records_wrapper(prompt, records_key)
-    return llm.invoke(prompt)
+    return invoke_llm_with_structured_output(
+        prompt=prompt,
+        output_schema=output_schema,
+        model_name=model_name,
+        temperature=temperature,
+        provider=provider,
+        records_key=records_key,
+    )
 
 
 def get_provider_info() -> Dict[str, Any]:

@@ -8,61 +8,230 @@ Field-level scoring
     field_similarity_score  – hybrid numeric / year / ROUGE-L scorer
 
 Record matching & evaluation
+    evaluate_record_pair_with_units – per-field scores, value+unit, crop swap
     find_crop_swap_pairs    – detect all crop-1/crop-2 column pairs
     match_records_greedy    – one-to-one greedy matching with swap support
     evaluate_method_scores  – normalized score over all GT records
     print_matching_pairs    – pretty-print matched pairs for inspection
     print_field_value_pairs_vs_gt – Step-1 pairs vs GT (same column layout)
 """
+from __future__ import annotations
+
 import ast
+import csv
+import io
 import json
 import os
 import re
 import decimal
-from datetime import date, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Final, Iterable, List, Mapping, Optional, Tuple, Union
 
 import numpy as np
 
-import pandas as pd
+try:  # Optional dependency in some environments (e.g., minimal CI / tooling)
+    import pandas as pd  # type: ignore
+except Exception:  # pragma: no cover
+    pd = None  # type: ignore
 
 from .file_utils import _find_project_root, get_all_paper_paths
+from .units import (
+    UNIT_FIELDS,
+    VALUE_TO_UNIT_FIELD,
+    Quantity,
+    Unit,
+    ValueUnitGroup,
+    WOPKE_100_GT_VALUE_UNIT_GROUPS,
+    WOPKE_100_VALUE_UNIT_GROUPS,
+    unit_field_for_value,
+    value_unit_groups,
+)
 
-DEFAULT_ANNOTATION = "data/wopke_100/annotation/wopke100.xlsx"
+RecordRow = Union[Mapping[str, Any], Any]
+
+DEFAULT_ANNOTATION = (
+    "data/wopke_paper_code/Database for combined sample 2015-03-05.csv"
+)
+
+# Ground-truth headers → wopke_100 standard field names (copies; originals kept).
+# Replications are stored as sample-size columns next to yield (N sc 1, …),
+# matching the LER-paper R script rename N.sc.1 → No._SC_1.
+GT_COLUMN_ALIASES: Final[Dict[str, str]] = {
+    "N sc 1": "Replications SC1",
+    "N sc 2": "Replications SC2",
+    "N ic 1": "Replications IC1",
+    "N ic 2": "Replications IC2",
+    "Unit.1": "N Unit",
+    "Unit.2": "P Unit",
+    "Unit.3": "K Unit",
+    "Data location": "Data source",
+}
+
+
+# Fields that participate in crop-1/crop-2 swap (see find_crop_swap_pairs).
+# Includes value fields with trailing 1/2 but excludes shared unit columns.
+SWAP_ELIGIBLE_SUFFIX_FIELDS: Final[Tuple[str, ...]] = (
+    "Crop species 1",
+    "Crop species 2",
+    "Crop type 1",
+    "Crop type 2",
+    "Fodder crop 1",
+    "Fodder crop 2",
+    "Density ic 1",
+    "Density ic 2",
+    "Density sc 1",
+    "Density sc 2",
+    "N input SC1",
+    "N input SC2",
+    "N input IC1",
+    "N input IC2",
+    "P input SC1",
+    "P input SC2",
+    "P input IC1",
+    "P input IC2",
+    "K input SC1",
+    "K input SC2",
+    "K input IC1",
+    "K input IC2",
+    "unified yield sc 1",
+    "unified yield sc 2",
+    "unified yield ic 1",
+    "unified yield ic 2",
+    "Sowing date 1",
+    "Sowing date 2",
+    "Harvest date 1",
+    "Harvest date 2",
+    "Replications SC1",
+    "Replications SC2",
+    "Replications IC1",
+    "Replications IC2",
+    "PLER 1",
+    "PLER 2",
+)
+
+
+def _dedupe_column_names(header: Iterable[Any]) -> List[str]:
+    """Make duplicate headers unique (``Unit`` → ``Unit``, ``Unit.1``, …)."""
+    seen: Dict[str, int] = {}
+    deduped: List[str] = []
+    for col in header:
+        name = "" if col is None else str(col)
+        if name in seen:
+            seen[name] += 1
+            deduped.append(f"{name}.{seen[name]}")
+        else:
+            seen[name] = 0
+            deduped.append(name)
+    return deduped
+
+
+def apply_gt_column_aliases(df: "pd.DataFrame") -> "pd.DataFrame":
+    """
+    Copy GT columns onto ``wopke_100`` standard names when missing.
+
+    Original headers are kept so unit-aware scoring can still read
+    ``Unit.1`` / ``N sc 1``.
+    """
+    out = df.copy()
+    for src, dst in GT_COLUMN_ALIASES.items():
+        if src in out.columns and dst not in out.columns:
+            out[dst] = out[src]
+    return out
+
+
+def _decode_csv_text(path: str) -> str:
+    raw = Path(path).read_bytes()
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1")
+
+
+def _load_gt_csv(path: str) -> "pd.DataFrame":
+    reader = csv.reader(io.StringIO(_decode_csv_text(path)))
+    header = next(reader)
+    data_rows = [row for row in reader if any(cell not in (None, "") for cell in row)]
+    n_cols = len(header)
+    padded = [list(row) + [""] * (n_cols - len(row)) for row in data_rows]
+    return pd.DataFrame(padded, columns=_dedupe_column_names(header))
+
+
+def _load_gt_xlsx(path: str, sheet: str) -> "pd.DataFrame":
+    import openpyxl
+
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    if sheet not in wb.sheetnames:
+        sheet = wb.sheetnames[0]
+    ws = wb[sheet]
+    rows = list(ws.iter_rows(values_only=True))
+    header = list(rows[0])
+    return pd.DataFrame(rows[1:], columns=_dedupe_column_names(header))
 
 
 def load_ground_truth(
     annotation_path: Optional[str] = None,
     sheet: str = "labels",
+    *,
+    apply_aliases: bool = True,
 ) -> pd.DataFrame:
     """
-    Load the ground-truth annotation spreadsheet, deduplicating column names.
+    Load the wopke_100 ground-truth table (CSV or Excel), deduplicating headers.
+
+    Default file is ``Database for combined sample 2015-03-05.csv``. Duplicate
+    headers get a ``.N`` suffix. When ``apply_aliases`` is true, standard names
+    such as ``Replications SC1`` and ``N Unit`` are copied from the GT columns.
 
     Returns:
-        DataFrame with unique column names (duplicate columns get a ``.N`` suffix).
+        DataFrame with unique column names.
     """
-    import openpyxl
-
     if annotation_path is None:
         annotation_path = os.path.join(_find_project_root(), DEFAULT_ANNOTATION)
 
-    wb = openpyxl.load_workbook(annotation_path, read_only=True, data_only=True)
-    ws = wb[sheet]
-    rows = list(ws.iter_rows(values_only=True))
-    header = list(rows[0])
+    suffix = Path(annotation_path).suffix.lower()
+    if suffix == ".csv":
+        gt_df = _load_gt_csv(annotation_path)
+    else:
+        gt_df = _load_gt_xlsx(annotation_path, sheet)
 
-    seen: Dict[str, int] = {}
-    deduped: List[str] = []
-    for col in header:
-        if col in seen:
-            seen[col] += 1
-            deduped.append(f"{col}.{seen[col]}")
-        else:
-            seen[col] = 0
-            deduped.append(col)
+    if apply_aliases:
+        gt_df = apply_gt_column_aliases(gt_df)
+    return gt_df
 
-    return pd.DataFrame(rows[1:], columns=deduped)
+
+def wopke_100_shared_fields(gt_columns: Iterable[Any]) -> List[str]:
+    """Return ``wopke_100`` standard fields present in ``gt_columns``."""
+    from src.standards import METADATA_STANDARDS
+
+    fields = list(json.loads(METADATA_STANDARDS["wopke_100"].strip()).keys())
+    cols = {str(c) for c in gt_columns}
+    return [f for f in fields if f in cols]
+
+
+def load_ground_truth_by_study_id(
+    annotation_path: Optional[str] = None,
+    sheet: str = "labels",
+    *,
+    apply_aliases: bool = True,
+) -> Dict[int, List[Dict[str, Any]]]:
+    """Load GT rows grouped by ``Study#``."""
+    gt_df = load_ground_truth(
+        annotation_path, sheet=sheet, apply_aliases=apply_aliases
+    )
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for rec in gt_df.to_dict(orient="records"):
+        sid_val = rec.get("Study#")
+        if sid_val is None or (isinstance(sid_val, float) and sid_val != sid_val):
+            continue
+        try:
+            sid_int = int(float(sid_val))
+        except (TypeError, ValueError):
+            continue
+        grouped.setdefault(sid_int, []).append(rec)
+    return grouped
 
 
 def build_study_paper_mapping(
@@ -213,6 +382,59 @@ _PURE_NUMBER_RE = re.compile(r"^[+-]?[\d,]+\.?\d*$")
 
 # Matches a parenthetical scientific name, e.g. "(Vicia faba)" or "(Triticum aestivum L.)"
 _SCIENTIFIC_NAME_RE = re.compile(r"\s*\([A-Z][a-z]+(?:\s+[a-z]+\.?)+\)")
+_DATE_FIELD_RE = re.compile(r"\b(date|sowing|harvest)\b", re.IGNORECASE)
+_RELATIVE_DAYS_RE = re.compile(
+    r"(\d{1,3})(?:\s*(?:-|to|and)\s*(\d{1,3}))?\s*days?\b",
+    re.IGNORECASE,
+)
+_MONTH_PATTERN = (
+    r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)"
+)
+_MONTH_NAMES_IN_TEXT_RE = re.compile(_MONTH_PATTERN, re.IGNORECASE)
+_DAY_MONTH_YEAR_IN_TEXT_RE = re.compile(
+    rf"(\d{{1,2}})\s+{_MONTH_PATTERN}\s+(\d{{4}})",
+    re.IGNORECASE,
+)
+_MONTH_DAY_YEAR_IN_TEXT_RE = re.compile(
+    rf"{_MONTH_PATTERN}\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,)?\s+(\d{{4}})",
+    re.IGNORECASE,
+)
+_MONTH_YEAR_IN_TEXT_RE = re.compile(
+    rf"{_MONTH_PATTERN}\s+(\d{{4}})",
+    re.IGNORECASE,
+)
+_DAY_MONTH_IN_TEXT_RE = re.compile(
+    rf"(\d{{1,2}})\s+{_MONTH_PATTERN}\b",
+    re.IGNORECASE,
+)
+
+_MONTH_ALIASES: Final[Dict[str, int]] = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
 
 
 def _is_missing(v: Any) -> bool:
@@ -332,6 +554,194 @@ def _extract_year(v: Any) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _is_date_field_name(field_name: Optional[str]) -> bool:
+    if not field_name:
+        return False
+    return bool(_DATE_FIELD_RE.search(field_name))
+
+
+def _month_to_number(month_token: str) -> Optional[int]:
+    return _MONTH_ALIASES.get(month_token.strip().lower())
+
+
+def _parse_absolute_iso_date_from_text(v: Any) -> Optional[str]:
+    """
+    Parse date-like values into an ISO date string when enough detail exists.
+
+    Supports:
+    - Excel serial numbers (e.g., 35693)
+    - Python date/datetime objects
+    - ISO strings (YYYY-MM-DD)
+    - Day Month Year patterns inside free text (e.g., "sown 16 April 1997")
+    - Month Day Year patterns (e.g., "April 16, 1997")
+    """
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+
+    s = str(v).strip()
+    if not s:
+        return None
+
+    excel_iso = _excel_serial_to_iso(s)
+    if excel_iso is not None:
+        return excel_iso
+
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        return s
+
+    m = _DAY_MONTH_YEAR_IN_TEXT_RE.search(s)
+    if m:
+        day = int(m.group(1))
+        month = _month_to_number(m.group(2))
+        year = int(m.group(3))
+        if month is not None:
+            try:
+                return date(year, month, day).isoformat()
+            except ValueError:
+                return None
+
+    m = _MONTH_DAY_YEAR_IN_TEXT_RE.search(s)
+    if m:
+        month = _month_to_number(m.group(1))
+        day = int(m.group(2))
+        year = int(m.group(3))
+        if month is not None:
+            try:
+                return date(year, month, day).isoformat()
+            except ValueError:
+                return None
+
+    return None
+
+
+def _parse_relative_days_value(v: Any) -> Optional[Tuple[int, int]]:
+    """Parse relative-duration expressions such as '105 days' or '50 and 95 days'."""
+    s = str(v).strip()
+    if not s:
+        return None
+    m = _RELATIVE_DAYS_RE.search(s)
+    if not m:
+        return None
+    d1 = int(m.group(1))
+    d2 = int(m.group(2)) if m.group(2) is not None else d1
+    lo, hi = sorted((d1, d2))
+    return lo, hi
+
+
+def _parse_month_day_without_year(v: Any) -> Optional[Tuple[int, int]]:
+    """Parse month+day expressions like '20 September' when year is absent."""
+    s = str(v).strip()
+    if not s:
+        return None
+    m = _DAY_MONTH_IN_TEXT_RE.search(s)
+    if not m:
+        return None
+    day = int(m.group(1))
+    month = _month_to_number(m.group(2))
+    if month is None:
+        return None
+    try:
+        date(2000, month, day)
+    except ValueError:
+        return None
+    return month, day
+
+
+def _extract_month_year(v: Any) -> Optional[Tuple[int, int]]:
+    """Extract month and year from expressions like 'Mid May 2004'."""
+    s = str(v).strip()
+    if not s:
+        return None
+    m = _MONTH_YEAR_IN_TEXT_RE.search(s)
+    if not m:
+        return None
+    month = _month_to_number(m.group(1))
+    year = int(m.group(2))
+    if month is None:
+        return None
+    return month, year
+
+
+def date_similarity_score(ref_val: Any, hyp_val: Any, *, debug: bool = False) -> float:
+    """
+    Compare date-like values with lightweight normalization across common formats.
+
+    Matching order:
+    1) Exact absolute date match (after converting serial/text forms to ISO date).
+    2) Exact relative-days match (e.g., "105 days" vs "105 days after sowing").
+    3) Exact month+day match when both omit year.
+    4) Exact month+year match (for coarse month-level expressions).
+    5) Exact year match.
+    6) Fallback to ROUGE-L soft text score.
+    """
+    if _is_missing(ref_val) or _is_missing(hyp_val):
+        return 0.0
+
+    ref_iso = _parse_absolute_iso_date_from_text(ref_val)
+    hyp_iso = _parse_absolute_iso_date_from_text(hyp_val)
+    if ref_iso is not None and hyp_iso is not None:
+        if debug:
+            print(f"Date absolute comparison: {ref_iso} vs {hyp_iso}")
+        return 1.0 if ref_iso == hyp_iso else 0.0
+
+    # If one side has a full date (with year) and the other side only provides
+    # month/day text, compare by month/day and ignore year.
+    def _iso_to_month_day(iso_date: str) -> Optional[Tuple[int, int]]:
+        try:
+            d = date.fromisoformat(iso_date)
+            return d.month, d.day
+        except ValueError:
+            return None
+
+    ref_iso_md = _iso_to_month_day(ref_iso) if ref_iso is not None else None
+    hyp_iso_md = _iso_to_month_day(hyp_iso) if hyp_iso is not None else None
+    ref_md = _parse_month_day_without_year(ref_val)
+    hyp_md = _parse_month_day_without_year(hyp_val)
+
+    if ref_iso_md is not None and hyp_md is not None:
+        if debug:
+            print(f"Date ISO-vs-month-day comparison: {ref_iso_md} vs {hyp_md}")
+        return 1.0 if ref_iso_md == hyp_md else 0.0
+
+    if hyp_iso_md is not None and ref_md is not None:
+        if debug:
+            print(f"Date month-day-vs-ISO comparison: {ref_md} vs {hyp_iso_md}")
+        return 1.0 if ref_md == hyp_iso_md else 0.0
+
+    ref_rel = _parse_relative_days_value(ref_val)
+    hyp_rel = _parse_relative_days_value(hyp_val)
+    if ref_rel is not None and hyp_rel is not None:
+        if debug:
+            print(f"Date relative-days comparison: {ref_rel} vs {hyp_rel}")
+        return 1.0 if ref_rel == hyp_rel else 0.0
+
+    if ref_md is not None and hyp_md is not None:
+        if debug:
+            print(f"Date month-day comparison: {ref_md} vs {hyp_md}")
+        return 1.0 if ref_md == hyp_md else 0.0
+
+    ref_my = _extract_month_year(ref_val)
+    hyp_my = _extract_month_year(hyp_val)
+    if ref_my is not None and hyp_my is not None:
+        if debug:
+            print(f"Date month-year comparison: {ref_my} vs {hyp_my}")
+        return 1.0 if ref_my == hyp_my else 0.0
+
+    ref_year = _extract_year(ref_val)
+    hyp_year = _extract_year(hyp_val)
+    if ref_year is not None and hyp_year is not None:
+        if debug:
+            print(f"Date year comparison: {ref_year} vs {hyp_year}")
+        return 1.0 if ref_year == hyp_year else 0.0
+
+    if _MONTH_NAMES_IN_TEXT_RE.search(str(ref_val)) and _MONTH_NAMES_IN_TEXT_RE.search(str(hyp_val)):
+        return rouge_l_soft_score(ref_val, hyp_val)
+
+    return rouge_l_soft_score(ref_val, hyp_val)
+
+
 def rouge_l_soft_score(ref_val: Any, hyp_val: Any) -> float:
     """
     Compute ROUGE-L F1 on character sequences.
@@ -362,7 +772,10 @@ def rouge_l_soft_score(ref_val: Any, hyp_val: Any) -> float:
 def field_similarity_score(
     ref_val: Any,
     hyp_val: Any,
-    field_name: Optional[str] = None) -> float:
+    field_name: Optional[str] = None,
+    *,
+    debug: bool = False,
+) -> float:
     """
     Hybrid similarity score for a single extracted field value compared to
     its ground-truth counterpart.
@@ -428,11 +841,16 @@ def field_similarity_score(
     if _is_missing(ref_val) or _is_missing(hyp_val):
         return 0.0
 
+    # ── 0. Date-field comparison (single routing point for pair evaluation) ──
+    if _is_date_field_name(field_name):
+        return date_similarity_score(ref_val, hyp_val, debug=debug)
+
     # ── 1. Numeric comparison ────────────────────────────────────────────────
     ref_dec = _try_parse_decimal(ref_val)
     hyp_dec = _try_parse_decimal(hyp_val)
     if ref_dec is not None and hyp_dec is not None:
-        print(f"Numeric comparison: {ref_dec} vs {hyp_dec}")
+        if debug:
+            print(f"Numeric comparison: {ref_dec} vs {hyp_dec}")
         # Exact numeric equality first (e.g. "3" == "3.0" == 3)
         if ref_dec == hyp_dec:
             return 1.0
@@ -449,7 +867,8 @@ def field_similarity_score(
     ref_excel = _excel_serial_to_iso(ref_val)
     hyp_excel = _excel_serial_to_iso(hyp_val)
     if ref_excel is not None or hyp_excel is not None:
-        print(f"Excel-serial-style date comparison: {ref_excel} vs {hyp_excel}")
+        if debug:
+            print(f"Excel-serial-style date comparison: {ref_excel} vs {hyp_excel}")
         # Try to normalise the other side to ISO date as well:
         # - if it's already ISO-like (YYYY-MM-DD), accept as-is;
         # - otherwise, fall back to year-only comparison below.
@@ -469,7 +888,8 @@ def field_similarity_score(
     ref_year = _extract_year(ref_val)
     hyp_year = _extract_year(hyp_val)
     if ref_year is not None and hyp_year is not None:
-        print(f"Year comparison: {ref_year} vs {hyp_year}")
+        if debug:
+            print(f"Year comparison: {ref_year} vs {hyp_year}")
         return 1.0 if ref_year == hyp_year else 0.0
 
     # ── 4. Text / categorical comparison ────────────────────────────────────
@@ -552,70 +972,801 @@ def find_crop_swap_pairs(cols: List[str]) -> List[Tuple[str, str]]:
     return pairs
 
 
+def is_present(v: Any) -> bool:
+    """
+    Return True iff a value should count as "present" (non-missing) in eval.
+
+    Intended for notebook code paths that operate on lists of dicts (CSV rows)
+    rather than pandas Series/DataFrames.
+    """
+    if v is None:
+        return False
+    s = str(v).strip()
+    if not s:
+        return False
+    return s.lower() not in {"nan", "none", "null", "n/a", "na"}
+
+
+def _apply_swaps_row(row: Dict[str, Any], pairs: List[Tuple[str, str]]) -> Dict[str, Any]:
+    if not pairs:
+        return row
+    out = dict(row)
+    for c1, c2 in pairs:
+        out[c1] = row.get(c2, None)
+        out[c2] = row.get(c1, None)
+    return out
+
+
+def swap_1_2_fields_for_records(
+    rows: List[Dict[str, Any]],
+    fields: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Return a copy of all records with every detected 1/2 field pair swapped.
+
+    The swap is applied globally to every record, not row-by-row conditionally.
+    For example, ``Crop species 1`` and ``Crop species 2`` are exchanged in
+    every predicted row, as are fields like ``N input SC1``/``N input SC2``.
+    """
+    if not rows:
+        return []
+    cols = fields or list(rows[0].keys())
+    swap_pairs = find_crop_swap_pairs(cols)
+    return [_apply_swaps_row(row, swap_pairs) for row in rows]
+
+
+def match_records_greedy_presence(
+    pred_rows: List[Dict[str, Any]],
+    gt_rows: List[Dict[str, Any]],
+    fields: List[str],
+    *,
+    allow_pair_swaps: bool = True,
+) -> List[Tuple[int, int, bool, float]]:
+    """
+    Greedy one-to-one record matching for list-of-dicts inputs, using a
+    *presence/label* signal (not full value similarity).
+
+    This mirrors the pairing heuristic used in
+    `notebooks/value_presence_confusion_per_method_per_paper.ipynb`:
+
+    - Missing/missing contributes 0.0 (prevents "free" matches on empty rows).
+    - For label-ish fields (name contains "species" or "label"): exact match
+      after normalisation.
+    - For other fields: any jointly-present values count as a match signal.
+
+    Crop-1/crop-2 fields can be swapped as a block; for each candidate pair the
+    better orientation is chosen before greedy matching.
+
+    Returns:
+        List of (pred_row_index, gt_row_index, swapped, mean_score) tuples.
+    """
+
+    def _normalize_label(v: Any) -> str:
+        return str(v).strip().lower()
+
+    def _is_label_field(col: str) -> bool:
+        lc = col.lower()
+        return ("species" in lc) or ("label" in lc)
+
+    def _field_signal(col: str, pred_val: Any, gt_val: Any) -> float:
+        pred_p = is_present(pred_val)
+        gt_p = is_present(gt_val)
+        if (not pred_p) or (not gt_p):
+            return 0.0
+        if _is_label_field(col):
+            return 1.0 if _normalize_label(pred_val) == _normalize_label(gt_val) else 0.0
+        return 1.0
+
+    swap_pairs = find_crop_swap_pairs(fields) if allow_pair_swaps else []
+
+    def _mean_signal(row_values: Dict[str, Any], gt_row: Dict[str, Any]) -> float:
+        if not fields:
+            return 0.0
+        s = 0.0
+        for c in fields:
+            s += _field_signal(c, row_values.get(c), gt_row.get(c))
+        return s / float(len(fields))
+
+    def _best_orientation(pred_row: Dict[str, Any], gt_row: Dict[str, Any]) -> Tuple[float, bool]:
+        mean_orig = _mean_signal(pred_row, gt_row)
+        if not swap_pairs:
+            return mean_orig, False
+        pred_swapped = _apply_swaps_row(pred_row, swap_pairs)
+        mean_swap = _mean_signal(pred_swapped, gt_row)
+        return (mean_swap, True) if mean_swap > mean_orig else (mean_orig, False)
+
+    candidates: List[Tuple[float, int, int, bool]] = []
+    for pred_i, pred_row in enumerate(pred_rows):
+        for gt_i, gt_row in enumerate(gt_rows):
+            mean_score, swapped = _best_orientation(pred_row, gt_row)
+            candidates.append((mean_score, pred_i, gt_i, swapped))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+
+    used_pred: set[int] = set()
+    used_gt: set[int] = set()
+    matches: List[Tuple[int, int, bool, float]] = []
+    for mean_score, pred_i, gt_i, swapped in candidates:
+        if pred_i in used_pred or gt_i in used_gt:
+            continue
+        used_pred.add(pred_i)
+        used_gt.add(gt_i)
+        matches.append((pred_i, gt_i, swapped, float(mean_score)))
+
+    return matches
+
+
+def confusion_counts_presence(
+    pred_rows: List[Dict[str, Any]],
+    gt_rows: List[Dict[str, Any]],
+    fields: List[str],
+    *,
+    allow_pair_swaps: bool = True,
+) -> Dict[str, float]:
+    """
+    Field-level TP/FP/FN/TN and TP-average similarity after greedy row matching.
+    """
+    conf: Dict[str, float] = {"TP": 0, "FP": 0, "FN": 0, "TN": 0}
+    tp_similarity_total = 0.0
+    tp_similarity_n = 0
+    swap_pairs = find_crop_swap_pairs(fields) if allow_pair_swaps else []
+
+    matches = match_records_greedy_presence(
+        pred_rows,
+        gt_rows,
+        fields,
+        allow_pair_swaps=allow_pair_swaps,
+    )
+    used_pred = {pred_i for pred_i, _, _, _ in matches}
+    used_gt = {gt_i for _, gt_i, _, _ in matches}
+
+    for pred_i, gt_i, swapped, _ in matches:
+        gt_row = gt_rows[gt_i]
+        pred_row = pred_rows[pred_i]
+        pred_row_adj = _apply_swaps_row(pred_row, swap_pairs) if swapped else pred_row
+        for f in fields:
+            gt_p = is_present(gt_row.get(f))
+            pred_p = is_present(pred_row_adj.get(f))
+            if gt_p and pred_p:
+                conf["TP"] += 1
+                tp_similarity_total += field_similarity_score(gt_row.get(f), pred_row_adj.get(f), field_name=f)
+                tp_similarity_n += 1
+            elif gt_p and not pred_p:
+                conf["FN"] += 1
+            elif (not gt_p) and pred_p:
+                conf["FP"] += 1
+            else:
+                conf["TN"] += 1
+
+    for gt_i, gt_row in enumerate(gt_rows):
+        if gt_i in used_gt:
+            continue
+        for f in fields:
+            if is_present(gt_row.get(f)):
+                conf["FN"] += 1
+            else:
+                conf["TN"] += 1
+
+    for pred_i, pred_row in enumerate(pred_rows):
+        if pred_i in used_pred:
+            continue
+        for f in fields:
+            if is_present(pred_row.get(f)):
+                conf["FP"] += 1
+            else:
+                conf["TN"] += 1
+
+    conf["tp_avg_similarity"] = (tp_similarity_total / tp_similarity_n) if tp_similarity_n else float("nan")
+    return conf
+
+
+def overall_metrics_presence(
+    pred_rows: List[Dict[str, Any]],
+    gt_rows: List[Dict[str, Any]],
+    fields: List[str],
+    *,
+    allow_pair_swaps: bool = True,
+) -> Dict[str, float]:
+    """Compute the notebook-style aggregate metrics for list-of-dicts rows."""
+    conf = confusion_counts_presence(
+        pred_rows,
+        gt_rows,
+        fields,
+        allow_pair_swaps=allow_pair_swaps,
+    )
+    TP, FP, FN, TN = conf["TP"], conf["FP"], conf["FN"], conf["TN"]
+    precision = TP / (TP + FP) if (TP + FP) else float("nan")
+    tp_avg_similarity = conf["tp_avg_similarity"]
+    true_precision = (
+        precision * tp_avg_similarity
+        if (precision == precision and tp_avg_similarity == tp_avg_similarity)
+        else float("nan")
+    )
+    recall = TP / (TP + FN) if (TP + FN) else float("nan")
+    specificity = TN / (TN + FP) if (TN + FP) else float("nan")
+    f1 = (2 * true_precision * recall / (true_precision + recall)) if (true_precision + recall) else float("nan")
+    return {
+        **conf,
+        "precision": precision,
+        "true_precision": true_precision,
+        "recall": recall,
+        "specificity": specificity,
+        "f1": f1,
+    }
+
+
+def choose_best_global_swap_orientation(
+    pred_rows: List[Dict[str, Any]],
+    gt_rows: List[Dict[str, Any]],
+    fields: List[str],
+    *,
+    score_key: str = "tp_avg_similarity",
+) -> Dict[str, Any]:
+    """
+    Compare original predictions vs globally swapped 1/2 fields and return the
+    higher-scoring orientation.
+
+    Pair-level swaps are disabled while scoring these two orientations, because
+    this function is deciding a single orientation for the entire method output.
+    """
+    original_metrics = overall_metrics_presence(
+        pred_rows,
+        gt_rows,
+        fields,
+        allow_pair_swaps=False,
+    )
+    swapped_rows = swap_1_2_fields_for_records(pred_rows, fields)
+    swapped_metrics = overall_metrics_presence(
+        swapped_rows,
+        gt_rows,
+        fields,
+        allow_pair_swaps=False,
+    )
+
+    original_score = original_metrics.get(score_key, float("nan"))
+    swapped_score = swapped_metrics.get(score_key, float("nan"))
+    use_swapped = (
+        (swapped_score == swapped_score)
+        and ((original_score != original_score) or swapped_score > original_score)
+    )
+
+    return {
+        "rows": swapped_rows if use_swapped else pred_rows,
+        "swapped": use_swapped,
+        "metrics": swapped_metrics if use_swapped else original_metrics,
+        "original_metrics": original_metrics,
+        "swapped_metrics": swapped_metrics,
+        "score": swapped_score if use_swapped else original_score,
+        "score_key": score_key,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Two-record evaluation (per field + value+unit + crop swap)
+# ---------------------------------------------------------------------------
+
+
+def _row_get(row: RecordRow, key: str, default: Any = None) -> Any:
+    """Read a field from a dict-like record or pandas Series."""
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, TypeError, IndexError):
+        return default
+
+
+def _row_to_dict(row: RecordRow) -> Dict[str, Any]:
+    if isinstance(row, dict):
+        return dict(row)
+    if hasattr(row, "to_dict"):
+        return row.to_dict()
+    return dict(row)
+
+
+def _try_parse_magnitude(value: Any) -> Optional[float]:
+    if _is_missing(value):
+        return None
+    dec = _try_parse_decimal(value)
+    if dec is not None:
+        return float(dec)
+    return None
+
+
+def _gt_unit_field_for_value(
+    value_field: str,
+    gt_row: RecordRow,
+    *,
+    gt_spreadsheet: bool = False,
+) -> Optional[str]:
+    """Resolve which GT column holds the unit for a value field."""
+    if gt_spreadsheet:
+        return unit_field_for_value(value_field, gt_spreadsheet=True)
+    pred_unit = unit_field_for_value(value_field)
+    gt_unit = unit_field_for_value(value_field, gt_spreadsheet=True)
+    if pred_unit and not _is_missing(_row_get(gt_row, pred_unit)):
+        return pred_unit
+    if gt_unit and not _is_missing(_row_get(gt_row, gt_unit)):
+        return gt_unit
+    return pred_unit or gt_unit
+
+
+def _try_build_quantity(value: Any, unit_symbol: Any) -> Optional[Quantity]:
+    mag = _try_parse_magnitude(value)
+    if mag is None or _is_missing(unit_symbol):
+        return None
+    try:
+        return Quantity(mag, Unit(str(unit_symbol).strip()))
+    except (ValueError, TypeError, ZeroDivisionError):
+        return None
+
+
+def unit_field_similarity_score(
+    ref_unit: Any,
+    hyp_unit: Any,
+) -> float:
+    """
+    Similarity for a standalone unit column (e.g. ``N Unit`` vs ``kg N/ha``).
+
+    Returns ``1.0`` when both parse as compatible :class:`~units.Unit` with the
+    same scale; otherwise falls back to :func:`field_similarity_score`.
+    """
+    if _is_missing(ref_unit) or _is_missing(hyp_unit):
+        return 0.0
+    try:
+        u_ref = Unit(str(ref_unit).strip())
+        u_hyp = Unit(str(hyp_unit).strip())
+        if u_ref.is_compatible(u_hyp) and abs(u_ref.conversion_factor_to(u_hyp) - 1.0) < 1e-9:
+            return 1.0
+    except ValueError:
+        pass
+    return field_similarity_score(ref_unit, hyp_unit)
+
+
+def value_with_unit_similarity_score(
+    pred_row: RecordRow,
+    gt_row: RecordRow,
+    value_field: str,
+    *,
+    gt_spreadsheet: bool = False,
+) -> float:
+    """
+    Score one numeric value field using its paired unit column on each row.
+
+    Builds :class:`~units.Quantity` for prediction and ground truth; returns
+    ``1.0`` if they are equal after unit conversion. Falls back to value-only
+    :func:`field_similarity_score` when either unit is missing.
+    """
+    pred_unit_field = unit_field_for_value(value_field)
+    gt_unit_field = _gt_unit_field_for_value(
+        value_field, gt_row, gt_spreadsheet=gt_spreadsheet
+    )
+
+    pred_val = _row_get(pred_row, value_field)
+    gt_val = _row_get(gt_row, value_field)
+    if _is_missing(pred_val) or _is_missing(gt_val):
+        return 0.0
+
+    pred_unit_val = _row_get(pred_row, pred_unit_field) if pred_unit_field else None
+    gt_unit_val = _row_get(gt_row, gt_unit_field) if gt_unit_field else None
+
+    q_pred = _try_build_quantity(pred_val, pred_unit_val)
+    q_gt = _try_build_quantity(gt_val, gt_unit_val)
+
+    if q_pred is not None and q_gt is not None:
+        return 1.0 if q_pred == q_gt else 0.0
+
+    if _is_missing(pred_unit_val) or _is_missing(gt_unit_val):
+        return field_similarity_score(gt_val, pred_val, field_name=value_field)
+
+    return 0.0
+
+
+def _unit_column_in_fields(
+    value_field: str,
+    fields: List[str],
+    gt_row: RecordRow,
+    *,
+    gt_spreadsheet: bool = False,
+) -> Optional[str]:
+    """Return the unit column name from ``fields`` paired with ``value_field``."""
+    candidates = []
+    pred_uf = unit_field_for_value(value_field)
+    if pred_uf:
+        candidates.append(pred_uf)
+    gt_uf = unit_field_for_value(value_field, gt_spreadsheet=True)
+    if gt_uf:
+        candidates.append(gt_uf)
+    if gt_spreadsheet:
+        gt_uf2 = _gt_unit_field_for_value(value_field, gt_row, gt_spreadsheet=True)
+        if gt_uf2:
+            candidates.append(gt_uf2)
+    field_set = set(fields)
+    for uf in candidates:
+        if uf in field_set:
+            return uf
+    return None
+
+
+def score_field_between_records(
+    pred_row: RecordRow,
+    gt_row: RecordRow,
+    field_name: str,
+    *,
+    gt_spreadsheet: bool = False,
+    quantity_matched_units: Optional[set[str]] = None,
+) -> float:
+    """
+    Score a single field between two records.
+
+    - Value fields with a paired unit → :func:`value_with_unit_similarity_score`
+    - Standalone unit columns → ``1.0`` if already matched via a value+unit pair,
+      else :func:`unit_field_similarity_score`
+    - All other fields → :func:`field_similarity_score`
+    """
+    if field_name in VALUE_TO_UNIT_FIELD:
+        return value_with_unit_similarity_score(
+            pred_row, gt_row, field_name, gt_spreadsheet=gt_spreadsheet
+        )
+    if field_name in UNIT_FIELDS or field_name in {
+        g.unit_field for g in WOPKE_100_GT_VALUE_UNIT_GROUPS
+    }:
+        if quantity_matched_units and field_name in quantity_matched_units:
+            return 1.0
+        return unit_field_similarity_score(
+            _row_get(gt_row, field_name),
+            _row_get(pred_row, field_name),
+        )
+    return field_similarity_score(
+        _row_get(gt_row, field_name),
+        _row_get(pred_row, field_name),
+        field_name=field_name,
+    )
+
+
+def score_all_fields_between_records(
+    pred_row: RecordRow,
+    gt_row: RecordRow,
+    fields: List[str],
+    *,
+    gt_spreadsheet: bool = False,
+) -> Dict[str, float]:
+    """
+    Per-field scores for one orientation.
+
+    Value fields with a paired unit are scored via combined
+    :class:`~units.Quantity` comparison. When that combined score is ``1.0``,
+    the paired unit column (if present in ``fields``) also receives ``1.0``.
+    """
+    scores: Dict[str, float] = {}
+    quantity_matched_units: set[str] = set()
+    unit_fields_in_batch = {f for f in fields if f in UNIT_FIELDS} | {
+        f for f in fields if f in {g.unit_field for g in WOPKE_100_GT_VALUE_UNIT_GROUPS}
+    }
+
+    for f in fields:
+        if f in unit_fields_in_batch:
+            continue
+        if f in VALUE_TO_UNIT_FIELD:
+            s = value_with_unit_similarity_score(
+                pred_row, gt_row, f, gt_spreadsheet=gt_spreadsheet
+            )
+            scores[f] = s
+            if s == 1.0:
+                uf = _unit_column_in_fields(
+                    f, fields, gt_row, gt_spreadsheet=gt_spreadsheet
+                )
+                if uf:
+                    quantity_matched_units.add(uf)
+            continue
+        scores[f] = field_similarity_score(
+            _row_get(gt_row, f),
+            _row_get(pred_row, f),
+            field_name=f,
+        )
+
+    for f in fields:
+        if f not in unit_fields_in_batch:
+            continue
+        scores[f] = score_field_between_records(
+            pred_row,
+            gt_row,
+            f,
+            gt_spreadsheet=gt_spreadsheet,
+            quantity_matched_units=quantity_matched_units,
+        )
+
+    return scores
+
+
+@dataclass
+class RecordPairEvaluation:
+    """
+    Result of comparing one predicted record to one ground-truth record.
+
+    ``field_scores`` uses the better of original vs crop-swapped prediction
+    orientation (step 3). ``field_scores_original`` / ``field_scores_swapped``
+    retain both orientations for inspection.
+    """
+
+    field_scores: Dict[str, float]
+    swapped: bool
+    mean_score: float
+    field_scores_original: Dict[str, float] = field(default_factory=dict)
+    field_scores_swapped: Dict[str, float] = field(default_factory=dict)
+    mean_score_original: float = 0.0
+    mean_score_swapped: float = 0.0
+    swap_pairs: Tuple[Tuple[str, str], ...] = ()
+
+    def as_tuple(self) -> Tuple[Dict[str, float], float, bool]:
+        """Legacy shape: ``(field_scores, mean_score, swapped)``."""
+        return self.field_scores, self.mean_score, self.swapped
+
+
+def evaluate_record_pair_with_units(
+    pred_row: RecordRow,
+    gt_row: RecordRow,
+    fields: List[str],
+    *,
+    gt_spreadsheet: bool = False,
+    allow_pair_swaps: bool = True,
+) -> RecordPairEvaluation:
+    """
+    Evaluate one prediction record against one GT record in three steps.
+
+    1. Score every field in ``fields`` for the original crop orientation.
+    2. For value fields with a paired unit, use combined value+unit comparison
+       (:class:`~units.Quantity`). When that score is ``1.0``, the paired unit
+       column in ``fields`` also receives ``1.0``. Other unit columns fall back
+       to :func:`unit_field_similarity_score`.
+    3. Optionally swap crop-1/crop-2 columns on the prediction row, repeat
+       steps 1–2, and keep whichever orientation has the higher mean score.
+
+    Args:
+        pred_row:        Extracted record (``dict`` or pandas Series).
+        gt_row:          Ground-truth record.
+        fields:          Column names to score.
+        gt_spreadsheet:  Use GT spreadsheet unit headers (``Unit.1``, …).
+        allow_pair_swaps: If ``False``, skip step 3.
+
+    Returns:
+        :class:`RecordPairEvaluation` with final scores and swap metadata.
+    """
+    if not fields:
+        return RecordPairEvaluation(
+            field_scores={},
+            swapped=False,
+            mean_score=0.0,
+        )
+
+    scores_original = score_all_fields_between_records(
+        pred_row, gt_row, fields, gt_spreadsheet=gt_spreadsheet
+    )
+    mean_original = float(np.mean(list(scores_original.values())))
+
+    swap_pairs = tuple(find_crop_swap_pairs(fields)) if allow_pair_swaps else ()
+    scores_swapped: Dict[str, float] = {}
+    mean_swapped = 0.0
+
+    if swap_pairs:
+        pred_swapped = _apply_swaps_row(_row_to_dict(pred_row), list(swap_pairs))
+        scores_swapped = score_all_fields_between_records(
+            pred_swapped, gt_row, fields, gt_spreadsheet=gt_spreadsheet
+        )
+        mean_swapped = float(np.mean(list(scores_swapped.values())))
+
+    use_swapped = bool(swap_pairs) and mean_swapped > mean_original
+    if use_swapped:
+        return RecordPairEvaluation(
+            field_scores=scores_swapped,
+            swapped=True,
+            mean_score=mean_swapped,
+            field_scores_original=scores_original,
+            field_scores_swapped=scores_swapped,
+            mean_score_original=mean_original,
+            mean_score_swapped=mean_swapped,
+            swap_pairs=swap_pairs,
+        )
+
+    return RecordPairEvaluation(
+        field_scores=scores_original,
+        swapped=False,
+        mean_score=mean_original,
+        field_scores_original=scores_original,
+        field_scores_swapped=scores_swapped,
+        mean_score_original=mean_original,
+        mean_score_swapped=mean_swapped,
+        swap_pairs=swap_pairs,
+    )
+
+
+def infer_gt_spreadsheet_columns(fields: List[str]) -> bool:
+    """True when GT rows use spreadsheet unit headers (``Unit.1``, …)."""
+    return "Unit.1" in fields or "Unit of density" in fields
+
+
+def pred_row_after_swap(
+    pred_row: RecordRow,
+    evaluation: RecordPairEvaluation,
+) -> Dict[str, Any]:
+    """Prediction row as used for scoring (after crop swap if applicable)."""
+    base = _row_to_dict(pred_row)
+    if evaluation.swapped and evaluation.swap_pairs:
+        return _apply_swaps_row(base, list(evaluation.swap_pairs))
+    return base
+
+
+def match_records_greedy_with_units(
+    pred_rows: List[Dict[str, Any]],
+    gt_rows: List[Dict[str, Any]],
+    fields: List[str],
+    *,
+    gt_spreadsheet: bool = False,
+) -> List[Tuple[int, int, RecordPairEvaluation]]:
+    """
+    Greedy one-to-one matching using :func:`evaluate_record_pair_with_units`.
+
+    Returns:
+        ``(pred_index, gt_index, evaluation)`` for each matched pair.
+    """
+    candidates: List[Tuple[float, int, int, RecordPairEvaluation]] = []
+    for pred_i, pred_row in enumerate(pred_rows):
+        for gt_i, gt_row in enumerate(gt_rows):
+            ev = evaluate_record_pair_with_units(
+                pred_row,
+                gt_row,
+                fields,
+                gt_spreadsheet=gt_spreadsheet,
+            )
+            candidates.append((ev.mean_score, pred_i, gt_i, ev))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+
+    used_pred: set[int] = set()
+    used_gt: set[int] = set()
+    matches: List[Tuple[int, int, RecordPairEvaluation]] = []
+    for _, pred_i, gt_i, ev in candidates:
+        if pred_i in used_pred or gt_i in used_gt:
+            continue
+        used_pred.add(pred_i)
+        used_gt.add(gt_i)
+        matches.append((pred_i, gt_i, ev))
+
+    return matches
+
+
+def confusion_counts_with_units(
+    pred_rows: List[Dict[str, Any]],
+    gt_rows: List[Dict[str, Any]],
+    fields: List[str],
+    *,
+    gt_spreadsheet: bool = False,
+) -> Dict[str, float]:
+    """Field-level TP/FP/FN/TN with unit-aware TP similarity."""
+    conf: Dict[str, float] = {"TP": 0, "FP": 0, "FN": 0, "TN": 0}
+    tp_similarity_total = 0.0
+    tp_similarity_n = 0
+
+    matches = match_records_greedy_with_units(
+        pred_rows, gt_rows, fields, gt_spreadsheet=gt_spreadsheet
+    )
+    used_pred = {pred_i for pred_i, _, _ in matches}
+    used_gt = {gt_i for _, gt_i, _ in matches}
+
+    for pred_i, gt_i, ev in matches:
+        gt_row = gt_rows[gt_i]
+        pred_adj = pred_row_after_swap(pred_rows[pred_i], ev)
+        for f in fields:
+            gt_p = is_present(gt_row.get(f))
+            pred_p = is_present(pred_adj.get(f))
+            if gt_p and pred_p:
+                conf["TP"] += 1
+                tp_similarity_total += ev.field_scores.get(f, 0.0)
+                tp_similarity_n += 1
+            elif gt_p and not pred_p:
+                conf["FN"] += 1
+            elif (not gt_p) and pred_p:
+                conf["FP"] += 1
+            else:
+                conf["TN"] += 1
+
+    for gt_i, gt_row in enumerate(gt_rows):
+        if gt_i in used_gt:
+            continue
+        for f in fields:
+            if is_present(gt_row.get(f)):
+                conf["FN"] += 1
+            else:
+                conf["TN"] += 1
+
+    for pred_i, pred_row in enumerate(pred_rows):
+        if pred_i in used_pred:
+            continue
+        for f in fields:
+            if is_present(pred_row.get(f)):
+                conf["FP"] += 1
+            else:
+                conf["TN"] += 1
+
+    conf["tp_avg_similarity"] = (
+        tp_similarity_total / tp_similarity_n if tp_similarity_n else float("nan")
+    )
+    return conf
+
+
+def overall_metrics_with_units(
+    pred_rows: List[Dict[str, Any]],
+    gt_rows: List[Dict[str, Any]],
+    fields: List[str],
+    *,
+    gt_spreadsheet: bool = False,
+) -> Dict[str, float]:
+    """Paper-level metrics using unit-aware greedy matching and field scores."""
+    conf = confusion_counts_with_units(
+        pred_rows, gt_rows, fields, gt_spreadsheet=gt_spreadsheet
+    )
+    TP, FP, FN, TN = conf["TP"], conf["FP"], conf["FN"], conf["TN"]
+    precision = TP / (TP + FP) if (TP + FP) else float("nan")
+    tp_avg_similarity = conf["tp_avg_similarity"]
+    true_precision = (
+        (precision * tp_avg_similarity)
+        if (precision == precision and tp_avg_similarity == tp_avg_similarity)
+        else float("nan")
+    )
+    recall = TP / (TP + FN) if (TP + FN) else float("nan")
+    specificity = TN / (TN + FP) if (TN + FP) else float("nan")
+    f1 = (
+        (2 * true_precision * recall / (true_precision + recall))
+        if (true_precision + recall)
+        else float("nan")
+    )
+    return {
+        **conf,
+        "precision": precision,
+        "true_precision": true_precision,
+        "recall": recall,
+        "specificity": specificity,
+        "f1": f1,
+    }
+
+
 def _pair_scores(
     ext_row: Any,
     gt_row: Any,
     cols: List[str],
 ) -> Tuple[Dict[str, float], float, bool]:
-    """
-    Compute per-field similarity between one extracted row and one GT row.
-
-    Also tries swapping all crop-1/crop-2 column pairs in the extracted row
-    (in case the model labelled the two crops in reverse order) and returns
-    whichever orientation scores higher.
-
-    Args:
-        ext_row: Extracted record (pandas Series or dict-like).
-        gt_row:  Ground-truth record (pandas Series or dict-like).
-        cols:    Field names to score.
-
-    Returns:
-        scores  – ``{field: similarity}`` for the winning orientation.
-        mean    – Mean similarity across all fields.
-        swapped – ``True`` when the swapped crop orientation was chosen.
-    """
-    def _score_orientation(row_values: Any) -> Tuple[Dict[str, float], float]:
-        s = {c: field_similarity_score(row_values.get(c, ""), gt_row.get(c, "")) for c in cols}
-        return s, float(np.mean(list(s.values()))) if s else 0.0
-
-    scores_orig, mean_orig = _score_orientation(ext_row)
-
-    swap_pairs = find_crop_swap_pairs(cols)
-    if swap_pairs:
-        ext_swapped: Dict[str, Any] = dict(ext_row)
-        for c1, c2 in swap_pairs:
-            ext_swapped[c1] = ext_row.get(c2, "")
-            ext_swapped[c2] = ext_row.get(c1, "")
-        scores_swap, mean_swap = _score_orientation(ext_swapped)
-        if mean_swap > mean_orig:
-            return scores_swap, mean_swap, True
-
-    return scores_orig, mean_orig, False
+    """Compute per-field similarity; delegates to :func:`evaluate_record_pair_with_units`."""
+    return evaluate_record_pair_with_units(ext_row, gt_row, cols).as_tuple()
 
 
 def evaluate_record_pair(
     ext_row: Any,
     gt_row: Any,
     shared_cols: List[str],
-) -> Tuple[Dict[str, float], float, bool]:
+    *,
+    gt_spreadsheet: bool = False,
+    detailed: bool = False,
+) -> Union[RecordPairEvaluation, Tuple[Dict[str, float], float, bool]]:
     """
     Evaluate a single extracted record against a single GT record.
 
-    This is a thin convenience wrapper around :func:`_pair_scores`, exposing the
-    same scoring logic used by :func:`match_records_greedy` and
-    :func:`evaluate_method_scores` for a single pair instead of whole DataFrames.
-
     Args:
-        ext_row:     Extracted record (pandas Series or dict-like).
-        gt_row:      Ground-truth record (pandas Series or dict-like).
-        shared_cols: Field names to score.
+        ext_row:        Extracted record (pandas Series or dict-like).
+        gt_row:         Ground-truth record.
+        shared_cols:    Field names to score.
+        gt_spreadsheet: GT uses ``Unit.1`` / ``Unit.2`` column names.
+        detailed:       If ``True``, return :class:`RecordPairEvaluation`; else
+                        legacy ``(field_scores, mean_score, swapped)`` tuple.
 
     Returns:
-        field_scores – ``{field: similarity}`` for the best crop orientation.
-        mean_score   – Mean similarity across all ``shared_cols``.
-        swapped      – ``True`` when the crop-1/crop-2 orientation was swapped.
+        Per-field scores for the best crop orientation, plus mean and swap flag.
     """
-    return _pair_scores(ext_row, gt_row, shared_cols)
+    result = evaluate_record_pair_with_units(
+        ext_row, gt_row, shared_cols, gt_spreadsheet=gt_spreadsheet
+    )
+    if detailed:
+        return result
+    return result.as_tuple()
 
 
 def match_records_greedy(
@@ -1021,16 +2172,47 @@ def print_matching_pairs(
 
 
 __all__ = [
+    "ValueUnitGroup",
+    "WOPKE_100_VALUE_UNIT_GROUPS",
+    "WOPKE_100_GT_VALUE_UNIT_GROUPS",
+    "VALUE_TO_UNIT_FIELD",
+    "UNIT_FIELDS",
+    "SWAP_ELIGIBLE_SUFFIX_FIELDS",
+    "GT_COLUMN_ALIASES",
+    "value_unit_groups",
+    "unit_field_for_value",
+    "apply_gt_column_aliases",
     "load_ground_truth",
+    "load_ground_truth_by_study_id",
+    "wopke_100_shared_fields",
     "build_study_paper_mapping",
     "get_paper_path_for_study",
     "highlight_numbers_and_tables",
     "build_extraction_context",
     "rouge_l_soft_score",
+    "date_similarity_score",
     "field_similarity_score",
     "find_crop_swap_pairs",
+    "is_present",
+    "swap_1_2_fields_for_records",
+    "RecordPairEvaluation",
+    "RecordRow",
     "evaluate_record_pair",
+    "evaluate_record_pair_with_units",
+    "infer_gt_spreadsheet_columns",
+    "pred_row_after_swap",
+    "match_records_greedy_with_units",
+    "confusion_counts_with_units",
+    "overall_metrics_with_units",
+    "score_field_between_records",
+    "score_all_fields_between_records",
+    "value_with_unit_similarity_score",
+    "unit_field_similarity_score",
     "match_records_greedy",
+    "match_records_greedy_presence",
+    "confusion_counts_presence",
+    "overall_metrics_presence",
+    "choose_best_global_swap_orientation",
     "evaluate_method_scores",
     "print_matching_pairs",
     "print_matching_pairs_from_df",

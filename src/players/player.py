@@ -18,7 +18,12 @@ from langchain_core.tools import BaseTool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from ..config import PLAYER_TEMPERATURE, create_llm, LLM_PROVIDER, structured_output_kwargs
+from ..config import (
+    PLAYER_TEMPERATURE,
+    create_llm,
+    LLM_PROVIDER,
+    iter_structured_output_kwargs,
+)
 
 
 def _primary_list_field_name(model_cls: Type[BaseModel]) -> Optional[str]:
@@ -67,6 +72,7 @@ class Player:
         self.name = name
         self.role_prompt = role_prompt
         self.tools = tools or []
+        self.provider = provider
         self.llm = create_llm(
             model_name=model_name,
             temperature=temperature,
@@ -757,16 +763,19 @@ Results from all analysts:
 """ + shape_hint + cardinality_block + """Generate the final structured output."""),
         ])
         
-        structured_llm = self.llm.with_structured_output(
-            output_schema,
-            **structured_output_kwargs(),
-        )
-        chain = prompt | structured_llm
-        
-        return chain.invoke({
-            "task": task,
-            "all_results": results_str
-        })
+        inputs = {"task": task, "all_results": results_str}
+        last_error: Optional[Exception] = None
+        for kwargs in iter_structured_output_kwargs(self.provider):
+            try:
+                structured_llm = self.llm.with_structured_output(
+                    output_schema, **kwargs
+                )
+                return (prompt | structured_llm).invoke(inputs)
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Structured synthesis failed with no error")
     
     def __repr__(self):
         return f"Player(name={self.name}, tools={len(self.tools)})"
