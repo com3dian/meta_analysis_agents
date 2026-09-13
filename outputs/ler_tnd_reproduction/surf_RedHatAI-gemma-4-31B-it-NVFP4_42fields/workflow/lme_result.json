@@ -1,0 +1,19 @@
+{
+  "model_tag": "surf_RedHatAI-gemma-4-31B-it-NVFP4_42fields",
+  "method": "workflow",
+  "intercept": 1.1943586674397757,
+  "tnd_coef": 0.05879272574459442,
+  "tnd_se": 0.2607390625122471,
+  "tnd_ci_low": -0.45224644614214765,
+  "tnd_ci_high": 0.5698318976313365,
+  "tnd_pvalue": 0.8216020581326349,
+  "n_records": 25,
+  "n_studies": 7,
+  "n_experiments": 9,
+  "n_reported_ler": 312,
+  "n_calculated_ler": 39,
+  "n_excluded_ler": 191,
+  "n_prepared_rows": 542,
+  "engine": "statsmodels",
+  "notes": "r_unavailable:[Errno 2] No such file or directory: 'Rscript'"
+}

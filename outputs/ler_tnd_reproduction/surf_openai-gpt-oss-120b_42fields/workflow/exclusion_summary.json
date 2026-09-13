@@ -1,0 +1,39 @@
+{
+  "model_tag": "surf_openai-gpt-oss-120b_42fields",
+  "method": "workflow",
+  "n_rows": 979,
+  "LER_source_counts": {
+    "excluded": 551,
+    "reported": 418,
+    "calculated_from_yields": 10
+  },
+  "TND_source_counts": {
+    "excluded": 896,
+    "calculated_from_dates": 83
+  },
+  "LER_exclusion_reasons": {
+    "missing_intercrop_yield_2": 11,
+    "incompatible_yield_unit": 20,
+    "ambiguous_numeric_range": 2,
+    "missing_yield_value": 487,
+    "missing_yield_unit": 23,
+    "missing_sole_yield_2": 8
+  },
+  "TND_exclusion_reasons": {
+    "missing_reported_tnd": 896
+  },
+  "LER_agreement_counts": {
+    "not_checkable": 942,
+    "disagree": 11,
+    "agree": 26
+  },
+  "n_unusual_ler": 10,
+  "n_regression_eligible": 50,
+  "n_matched": 25,
+  "n_analysis": 25,
+  "match_exclusion_reasons": {
+    "missing_final_ler": 551,
+    "missing_final_tnd": 378,
+    "unmatched_eligible_row": 25
+  }
+}

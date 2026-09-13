@@ -1,0 +1,40 @@
+{
+  "model_tag": "surf_RedHatAI-gemma-4-31B-it-NVFP4_42fields",
+  "method": "workflow",
+  "n_rows": 542,
+  "LER_source_counts": {
+    "reported": 312,
+    "calculated_from_yields": 39,
+    "excluded": 191
+  },
+  "TND_source_counts": {
+    "excluded": 473,
+    "calculated_from_dates": 68,
+    "reported": 1
+  },
+  "LER_exclusion_reasons": {
+    "missing_intercrop_yield_2": 6,
+    "missing_yield_value": 137,
+    "incompatible_yield_unit": 39,
+    "missing_sole_yield_2": 3,
+    "missing_intercrop_yield_1": 6
+  },
+  "TND_exclusion_reasons": {
+    "missing_reported_tnd": 458,
+    "tnd_out_of_range": 15
+  },
+  "LER_agreement_counts": {
+    "not_checkable": 362,
+    "agree": 124,
+    "disagree": 56
+  },
+  "n_unusual_ler": 5,
+  "n_regression_eligible": 37,
+  "n_matched": 25,
+  "n_analysis": 25,
+  "match_exclusion_reasons": {
+    "missing_final_tnd": 314,
+    "missing_final_ler": 191,
+    "unmatched_eligible_row": 12
+  }
+}

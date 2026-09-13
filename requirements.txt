@@ -6,4 +6,7 @@ pydantic
 python-dotenv
 pandas
 pypdf
+statsmodels  # nested LME fallback when R nlme is unavailable
+matplotlib
+numpy
 ruff  # For linting

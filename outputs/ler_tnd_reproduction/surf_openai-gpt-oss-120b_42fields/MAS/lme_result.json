@@ -1,0 +1,19 @@
+{
+  "model_tag": "surf_openai-gpt-oss-120b_42fields",
+  "method": "MAS",
+  "intercept": 1.0643242764947245,
+  "tnd_coef": 0.5396107513721646,
+  "tnd_se": NaN,
+  "tnd_ci_low": NaN,
+  "tnd_ci_high": NaN,
+  "tnd_pvalue": NaN,
+  "n_records": 34,
+  "n_studies": 10,
+  "n_experiments": 14,
+  "n_reported_ler": 248,
+  "n_calculated_ler": 9,
+  "n_excluded_ler": 510,
+  "n_prepared_rows": 767,
+  "engine": "statsmodels",
+  "notes": "r_unavailable:[Errno 2] No such file or directory: 'Rscript'"
+}

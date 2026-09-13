@@ -1,0 +1,39 @@
+{
+  "model_tag": "surf_Qwen-Qwen3-6-35B-A3B-FP8_42fields",
+  "method": "direct_llm",
+  "n_rows": 785,
+  "LER_source_counts": {
+    "reported": 520,
+    "calculated_from_yields": 96,
+    "excluded": 169
+  },
+  "TND_source_counts": {
+    "excluded": 623,
+    "calculated_from_dates": 162
+  },
+  "LER_exclusion_reasons": {
+    "missing_intercrop_yield_2": 12,
+    "missing_yield_value": 109,
+    "missing_sole_yield_2": 19,
+    "missing_sole_yield_1": 17,
+    "incompatible_yield_unit": 6,
+    "zero_sole_crop_yield": 6
+  },
+  "TND_exclusion_reasons": {
+    "missing_reported_tnd": 623
+  },
+  "LER_agreement_counts": {
+    "not_checkable": 443,
+    "disagree": 178,
+    "agree": 164
+  },
+  "n_unusual_ler": 1,
+  "n_regression_eligible": 140,
+  "n_matched": 106,
+  "n_analysis": 106,
+  "match_exclusion_reasons": {
+    "missing_final_tnd": 476,
+    "missing_final_ler": 169,
+    "unmatched_eligible_row": 34
+  }
+}

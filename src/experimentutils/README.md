@@ -138,7 +138,7 @@ Swap is applied at two levels today:
 Compare one prediction row vs one GT row (dict or pandas Series):
 
 1. **Per field** — `score_all_fields_between_records` fills a score dict.
-2. **Value + unit** — fields in `VALUE_TO_UNIT_FIELD` use `Quantity(value, unit)` equality. When that score is `1.0`, the paired unit column in `fields` also gets `1.0` (not a separate text match on `kg ha-1` vs `g ha-1`).
+2. **Value + unit** — fields in `VALUE_TO_UNIT_FIELD` compare `Quantity(value, unit)` magnitudes after conversion, matching if relative error vs GT is ≤ 2%. When that score is `1.0`, the paired unit column in `fields` also gets `1.0` (not a separate text match on `kg ha-1` vs `g ha-1`).
 3. **Crop swap** — swap prediction `…1` / `…2` columns, re-score, keep the orientation with higher **mean** score.
 
 ```python

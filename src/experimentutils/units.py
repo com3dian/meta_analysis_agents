@@ -349,9 +349,122 @@ def unit_field_for_value(value_field: str, *, gt_spreadsheet: bool = False) -> O
     return VALUE_TO_UNIT_FIELD.get(value_field)
 
 
-# ---------------------------------------------------------------------------
-# Dimensional unit parsing and conversion
-# ---------------------------------------------------------------------------
+# GT spreadsheet headers and prediction unit columns for N/P/K fertilizer groups.
+_GT_UNIT_NUTRIENT: Final[Dict[str, str]] = {
+    "Unit.1": "N",
+    "Unit.2": "P",
+    "Unit.3": "K",
+}
+_PRED_UNIT_NUTRIENT: Final[Dict[str, str]] = {
+    "N Unit": "N",
+    "P Unit": "P",
+    "K Unit": "K",
+}
+
+
+def nutrient_tag_for_value_field(value_field: str) -> Optional[str]:
+    """Return ``N`` / ``P`` / ``K`` for fertilizer amount fields, else ``None``."""
+    if value_field.startswith("N "):
+        return "N"
+    if value_field.startswith("P "):
+        return "P"
+    if value_field.startswith("K "):
+        return "K"
+    return None
+
+
+def nutrient_tag_for_unit_field(unit_field: str) -> Optional[str]:
+    """Return ``N`` / ``P`` / ``K`` for fertilizer unit columns, else ``None``."""
+    return _GT_UNIT_NUTRIENT.get(unit_field) or _PRED_UNIT_NUTRIENT.get(unit_field)
+
+
+def _is_generic_kg_per_ha(unit_str: str) -> bool:
+    """True for bare ``kg/ha``-style GT units (not ``t/ha``, ``Mg/ha``, etc.)."""
+    norm = _normalize_unit_text(unit_str).replace(" ", "")
+    return bool(re.fullmatch(r"kg/?ha(-?1)?", norm))
+
+
+def canonicalize_fertilizer_unit(
+    unit_str: Any,
+    *,
+    nutrient: Optional[str] = None,
+) -> str:
+    """
+    Expand generic GT mass-per-area units (``kg/ha``) with a nutrient tag.
+
+    Ground-truth ``Unit.1`` is often bare ``kg/ha`` while the row holds N
+    fertilizer amounts. For N/P/K fields we treat that as ``kg N/ha``,
+    ``kg P/ha``, or ``kg K/ha`` so quantities like ``5 g N m-2`` match
+    ``50 kg/ha``.
+    """
+    if nutrient is None or unit_str is None:
+        return "" if unit_str is None else str(unit_str).strip()
+    s = str(unit_str).strip()
+    if not s:
+        return s
+    try:
+        parsed = Unit(s)
+    except (ValueError, TypeError):
+        return s
+    if parsed.dimension.substance is not None:
+        return s
+    if not _is_generic_kg_per_ha(s):
+        return s
+    return f"kg {nutrient}/ha"
+
+
+def is_yield_value_field(value_field: str) -> bool:
+    """True for ``unified yield *`` amount columns."""
+    return value_field.startswith("unified yield")
+
+
+def is_yield_unit_field(unit_field: str) -> bool:
+    return unit_field == "Yield unit"
+
+
+def _is_generic_g_per_m2(unit_str: str) -> bool:
+    """Bare ``g/m2`` without dry-matter tag (GT yield convention)."""
+    norm = _normalize_unit_text(unit_str).replace(" ", "")
+    if "dm" in norm:
+        return False
+    return bool(re.fullmatch(r"g/?m-?2", norm))
+
+
+def _is_honest_gt_yield_unit(unit_str: str) -> bool:
+    """
+    True when GT ``Yield unit`` matches the **t/ha-scale** ``unified yield *`` values.
+
+    In the wopke spreadsheet, ``unified yield *`` is almost always stored on a t/ha
+    magnitude (0.2–30), while ``g/m2``, ``kg/ha``, ``q/ha``, and ``kg/m2`` labels are
+    misleading. Only ``t/ha`` and ``Mg/ha`` labels are literal.
+    """
+    norm = _normalize_unit_text(unit_str).replace(" ", "")
+    return norm in {"t/ha", "mg/ha"}
+
+
+def canonicalize_yield_unit(unit_str: Any, *, for_gt: bool = False) -> str:
+    """
+    Normalize yield units for cross-format comparison.
+
+    - Predictions ``g DM m-2`` → ``g/m2`` (drop DM substance tag).
+    - GT ``unified yield *`` values use **t/ha magnitudes** for most ``Yield unit``
+      labels; mislabeled ``g/m2`` / ``kg/ha`` / ``q/ha`` / ``kg/m2`` → ``t/ha``.
+    """
+    if unit_str is None:
+        return ""
+    s = str(unit_str).strip()
+    if not s:
+        return s
+    try:
+        parsed = Unit(s)
+    except (ValueError, TypeError):
+        return s
+    if parsed.dimension.substance == "DM":
+        return "g/m2"
+    if for_gt and not _is_honest_gt_yield_unit(s):
+        return "t/ha"
+    return s
+
 
 _MASS_TO_G: dict[str, float] = {
     "g": 1.0,
@@ -392,11 +505,91 @@ _COUNT_BASES = frozenset(
 
 _UNICODE_MINUS = str.maketrans("−⁻", "--")
 
+# Hyphens, minus signs, and thin spaces common in LLM / PDF unit strings.
+_UNICODE_HYPHENS = str.maketrans(
+    {
+        "\u2212": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\uFE58": "-",
+        "\uFE63": "-",
+        "\uFF0D": "-",
+        "−": "-",
+        "⁻": "-",
+    }
+)
+_SUPERSCRIPT_DIGITS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
+_UNICODE_SPACES_RE = re.compile(r"[\u00a0\u202f\u2009\u2002\u2003]+")
+_HYPHEN_CLASS = r"[-\u2010\u2011\u2012\u2013\u2014\u2212\uFE58\uFE63\uFF0D⁻−]"
+
+
+def sanitize_unit_string(symbol: str) -> str:
+    """
+    Normalize common LLM / spreadsheet unit variants before parsing.
+
+    Handles unicode hyphens and spaces, LaTeX exponents (``^{-1}``), glued
+    tokens (``kgNha-1``), tonne synonyms (``tonnes/ha``), and ``dry matter``.
+    """
+    s = str(symbol).strip()
+    if not s:
+        return s
+    s = _UNICODE_SPACES_RE.sub(" ", s)
+    s = s.translate(_UNICODE_HYPHENS)
+    s = s.translate(_SUPERSCRIPT_DIGITS)
+    s = s.replace("·", " ").replace("⋅", " ")
+    s = s.replace("m²", "m2").replace("m^2", "m2")
+    s = re.sub(r"\^{-1}", "-1", s)
+    s = re.sub(r"\^-(\d+)", r"-\1", s)
+    s = re.sub(r"\^(\d+)", r"\1", s)
+    s = re.sub(r"\bdry\s+matter\b", "DM", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bdry\s+weight\b", "DM", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*\([^)]*\)\s*", " ", s)
+    s = re.sub(r"\s+nitrogen\s*$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+year-1\s*$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\btonnes?\b", "t", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bMT\b", "t", s)
+    s = re.sub(r"\bton/ha\b", "t/ha", s, flags=re.IGNORECASE)
+    s = re.sub(r"^ton$", "t ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bkg\s*Nh\s*a-1\b", "kg N ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bkg\s*NP\s*ha-1\b", "kg N ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bkgNha-1\b", "kg N ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bkgha-1\b", "kg ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\btha-1\b", "t ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bMgha-1\b", "Mg ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bkgNha\b", "kg N ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bkgha\b", "kg ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\btha\b", "t ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bMgha\b", "Mg ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bkgN\b", "kg N", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bgNm-2\b", "g N m-2", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bgNm\b", "g N m", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bton\s+ha-1\b", "t ha-1", s, flags=re.IGNORECASE)
+    s = re.sub(r"kgN\s*/\s*ha", "kg N/ha", s, flags=re.IGNORECASE)
+    s = re.sub(r"kg\s*/\s*haN", "kg N/ha", s, flags=re.IGNORECASE)
+    s = re.sub(r"kg/ha\s+N\b", "kg N/ha", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bper\b", "/", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*/\s*", "/", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
 
 def _normalize_unit_text(symbol: str) -> str:
-    s = symbol.strip().translate(_UNICODE_MINUS)
-    s = re.sub(r"(?<![a-z])ha[-⁻−\s]*¹?", "ha-1", s, flags=re.IGNORECASE)
-    s = re.sub(r"m2[-⁻−\s]*¹?", "m2", s, flags=re.IGNORECASE)
+    s = sanitize_unit_string(symbol).translate(_UNICODE_MINUS)
+    s = re.sub(
+        rf"(?<![a-z])ha(?:{_HYPHEN_CLASS}|\s)*-?1",
+        "ha-1",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(
+        rf"m2(?:{_HYPHEN_CLASS}|\s)*-?2",
+        "m-2",
+        s,
+        flags=re.IGNORECASE,
+    )
     s = re.sub(r"[¹²³]", "", s)
     s = s.replace("₂", "2").replace("₅", "5")
     # Megagram (Mg) must not collapse to milligram (mg) when lowercased.
@@ -575,7 +768,7 @@ class Unit:
     __slots__ = ("_symbol", "_dim", "_factor")
 
     def __init__(self, symbol: str) -> None:
-        self._symbol = symbol.strip()
+        self._symbol = sanitize_unit_string(symbol)
         self._dim, self._factor = _parse_unit_symbol(self._symbol)
 
     @property
@@ -674,4 +867,11 @@ __all__ = [
     "UNIT_FIELDS",
     "value_unit_groups",
     "unit_field_for_value",
+    "nutrient_tag_for_value_field",
+    "nutrient_tag_for_unit_field",
+    "canonicalize_fertilizer_unit",
+    "is_yield_value_field",
+    "is_yield_unit_field",
+    "canonicalize_yield_unit",
+    "sanitize_unit_string",
 ]

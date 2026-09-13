@@ -1,0 +1,924 @@
+      Can Generative AI Automate Data Extraction for Meta-Analysis? A case
+                  study on intercropping practice in agriculture
+
+
+                                             Anonymous ACL submission
+
+
+
+
+001                         Abstract                             (Antle et al., 2017; Grassini et al., 2015). Evidence   044
+
+002       Meta-analysis serves as an important research          from different environments must therefore be syn-      045
+003       paradigm in agriculture and is especially diffi-       thesized to identify suitable crop combinations and     046
+004       cult in fields such as intercropping, where data       management practices.                                   047
+005       are scattered across regions, species, experi-            Meta-analysis systematically combines quantita-      048
+006       ments, and treatments. Extracting data from            tive evidence from published studies to assess out-     049
+007       published literature is labor-intensive, time-         comes across diverse conditions (Gurevitch et al.,      050
+008       consuming, and tedious. With the growing
+                                                                 2018). This generally involves identifying eligi-       051
+009       capabilities of LLMs, many recent attempts
+010       have focused on building systems and tools             ble studies, extracting comparable outcomes and         052
+
+011       to automate data collection, yet rigorous as-          their uncertainty, and synthesizing the evidence        053
+012       sessment against human-labeled ground truth            statistically. In agriculture, this evidence can help   054
+013       is often missing. In this research, we apply           evaluate management strategies and provide em-          055
+014       three LLM-based approaches—direct zero-shot            pirical data for models exploring production and        056
+015       prompting, a staged workflow, and a multi-             climate-adaptation scenarios (Antle et al., 2017;       057
+016       agent system—with six open-weight models
+                                                                 Holzworth et al., 2014). Meta-regression extends        058
+017       to extract data from a human curated inter-
+018       cropping meta-analysis dataset. The results
+                                                                 this approach by examining whether study-level          059
+
+019       are evaluated against the ground truth and             factors explain variation in outcomes across stud-      060
+020       through a downstream analysis. Overall, di-            ies. This makes it necessary to extract not only the    061
+021       rect zero-shot prompting is the strongest and          reported outcomes, but also the context in which        062
+022       most consistent approach, achieving the highest        they were observed. Because crop responses de-          063
+023       mean similarity-adjusted F1 of 0.577, although         pend strongly on local soil, weather, and manage-       064
+024       none of the approaches is close to fully accu-         ment conditions, a reported yield value is meaning-     065
+025       rate. In the downstream analysis, most model–
+                                                                 ful only when its experimental context is retained      066
+026       approach combinations recover the direction
+027       of the relationship between the predictor and          (Antle et al., 2017; Grassini et al., 2015). Meta-      067
+
+028       outcome variables, but do not estimate its mag-        analysis in agricultural sciences therefore requires    068
+029       nitude accurately.                                     structured datasets that preserve not only numeri-      069
+                                                                 cal measurements, but also experimental designs,        070
+030   1   Introduction
+                                                                 treatment comparisons, environmental conditions,        071
+031   Modern agriculture faces the dual challenge of in-         and measurement units.                                  072
+032   creasing food production for a growing global pop-            Constructing these datasets is particularly dif-     073
+033   ulation while adapting to climate change (Godfray          ficult for intercropping research, due to the lack      074
+034   et al., 2010). Meeting these demands requires a            of standardization and widely-accepted protocols,       075
+035   transition from conventional monoculture toward            variations in equipment, and variability of metrics     076
+036   more diversified cropping systems (Tamburini et al.,       reported in each local study. A single trial may        077
+037   2020). Intercropping is one such system, in which          report dozens of related measurements across in-        078
+038   two or more crop species are grown together to             tercropped plots and their corresponding sole-crop      079
+039   improve resource-use efficiency and ecological re-         controls. Studies also differ widely in their objec-    080
+040   silience (Brooker et al., 2015). However, its ben-         tives, terminology, management conditions, out-         081
+041   efits vary across crop combinations, pedoclimatic          comes, and units (Connolly et al., 2001). The in-       082
+042   conditions, and management practices such as sow-          formation required for one experimental record is       083
+043   ing dates, planting densities, and fertilizer inputs       often scattered throughout a paper: trial designs       084
+
+
+                                                             1
+085   may be described in the text, numerical results re-         2     Problem Statement                                   136
+086   ported in multi-level tables, and units or exceptions
+087   provided only in captions or footnotes. Although            2.1    Structured Data Extraction                         137
+088   human experts can interpret and connect this infor-         Given the textual content of a research paper ex-         138
+089   mation, manual curation requires substantial time           tracted from a PDF, our task is to identify informa-      139
+090   and effort, creating a major bottleneck for large-          tion relevant to a predefined schema and organize it      140
+091   scale evidence synthesis.                                   into a set of structured records. Information avail-      141
+092      Earlier attempts to automate evidence synthesis          able only in images is outside the scope of the task.     142
+093   relied mainly on task-specific NLP pipelines, with          A paper may contain zero, one, or multiple records,       143
+094   separate components for document filtering, en-             and the information needed for one record may             144
+095   tity recognition, and relation extraction (Callaghan        appear in different parts of the paper.                   145
+096   et al., 2021; Sietsma et al., 2024; G. et al., 2023;           Each record represents one experimental com-           146
+097   Chebbi et al., 2024; Rezayi et al., 2022). Although         parison and contains a fixed set of fields defined        147
+098   effective for well-defined subtasks, these pipelines        by the schema. For a meta-analysis, these fields          148
+099   can propagate errors between stages and often               may describe the study conditions, treatment and          149
+100   struggle to assemble information into complete ex-          control groups, measured outcomes, and observed           150
+101   perimental records. Many relevant relationships             effects. The task therefore requires not only ex-         151
+102   extend beyond individual sentences or paragraphs            tracting the correct values, but also preserving their    152
+103   and require information to be connected across the          logical connections by grouping values that refer         153
+104   full document (Jain et al., 2020).                          to the same comparison.                                   154
+105      Large language models provide a more general
+106   approach: a single model can follow different ex-           2.2    Challenges Specific to Agricultural                155
+107   traction schemas, integrate broader context, and                   Studies                                            156
+108   perform multiple extraction tasks (Kojima et al.,
+109   2023). This flexibility has led to growing inter-           Intercropping experiments often span multiple sites,      157
+
+110   est in LLM-based scientific information extraction          seasons, and treatments, requiring each mixture to        158
+
+111   (Dagdelen et al., 2024; Gupta et al., 2024) and             be matched with two sole-crop comparators under           159
+
+112   agentic designs such as ReAct, plan-and-execute,            comparable management. This is difficult when             160
+
+113   and AFlow (Yao et al., 2023; Erdogan et al., 2025;          fertilizer inputs or planting densities differ among      161
+
+114   Zhang et al., 2025). Such designs may help de-              treatments (Yu et al., 2015; Liu et al., 2024; Osiru      162
+
+115   compose complex tasks, but additional stages can            & Willey, 1972; Wang et al., 2021). The pro-              163
+
+116   also introduce context loss and error propagation.          duction syndromes identified by ? further show            164
+
+117   Whether they improve extraction from complex                that crop composition, spatial design, management,        165
+
+118   agricultural studies remains an open question.              timing, location, and yields must remain correctly        166
+
+119      In this work, we investigate whether genera-             linked. Outcomes may include crop-level yields,           167
+
+120   tive AI can reliably extract complex intercrop-             system-level yields, or indices such as the land          168
+
+121   ping trial data. We compare a direct zero-shot              equivalent ratio (Brooker et al., 2014), often re-        169
+
+122   approach, a staged workflow, and a multi-agent              ported under nested table headers and in different        170
+
+123   system across six LLMs. We evaluate their outputs           units. Breaking these relationships can produce           171
+
+124   against human-curated records and test their ability        incorrectly linked or omitted records and distort         172
+
+125   to reproduce a published meta-analysis. Our main            downstream analysis.                                      173
+
+126   contributions are:
+                                                                  3     Data & Experiment                                   174
+127    1. We formulate the structuring of complex agri-
+128       cultural trial data as an information extrac-           This section introduces the data used and the exper-      175
+129       tion task and establish an annotated evaluation         imental setup of this study. We use three generative-     176
+130       benchmark.                                              AI-based approaches to repeat the data-extraction         177
+131    2. We compare three LLM-based approaches on                stage of Yu et al. (2015), hereafter referred to as the   178
+132       multi-level trial structures and cross-table at-        reference study. We then reproduce the subsequent         179
+133       tribute binding.                                        analysis by fitting the same linear mixed-effects         180
+134    3. We assess how extraction errors affect the re-          model specified in the original R analysis to the         181
+135       production of published meta-analytic findings.         LLM-extracted outputs.                                    182
+
+
+                                                              2
+183   3.1   Data                                                  Sowing of                                 Harvest of
+                                                                  species 1                    Poverlap     species 1
+
+184   The reference study manually collected 746 records
+                                                                              Growing period of species 1
+185   from 100 intercropping papers: the 50 most highly
+                                                                                              Growing period of species 2
+186   cited papers in the analysed corpus and 50 selected
+187   at random. Only 90 of the 100 paper folders could                         Sowing of
+                                                                                               Psystem
+                                                                                                                            Harvest of
+188   be reliably mapped to the corresponding ground-                           species 2                                   species 2
+
+189   truth studies, so we conduct the extraction experi-
+                                                                  Figure 1: Illustration of temporal niche differentiation.
+190   ment on these 90 papers.
+                                                                  Adapted from Yu et al. (2015).
+191      The source papers were preprocessed using
+192   MinerU (Wang et al., 2026) and converted from
+193   PDF into Markdown documents, which serve as                    where YIC1 and YIC2 are species yields under                        229
+194   the textual input to the three extraction approaches.       intercropping, and YSC1 and YSC2 are their corre-                      230
+195      The complete ground-truth dataset contains 135           sponding sole-crop yields. An LER above 1 indi-                        231
+196   variables, including bibliographic and administra-          cates greater land-use efficiency under intercrop-                     232
+197   tive information outside the extraction task. We            ping.                                                                  233
+198   evaluate the predefined subset of 42 extraction vari-       3.2.1 Analysis in the Reference Study                                  234
+199   ables without modifying their definitions or ground-
+                                                                  We reproduce the main analysis conducted in the                        235
+200   truth values.
+                                                                  reference study. This subsection describes that anal-                  236
+
+201   3.2   Extraction Schema and Key Variables                   ysis and identifies the information required to re-                    237
+                                                                  produce it. The authors investigated the following                     238
+202   We use the field definitions provided by the author         research question:                                                     239
+203   of the reference study to clarify what information is
+204   contained in each intercropping record. Definitions               Do crop combinations have a higher LER                           240
+205   of all 42 extracted fields are provided in Appendix               when their TND is larger, i.e. when they                         241
+206   Table 2. Among these fields, Temporal niche dif-                  overlap (and compete) less?                                      242
+207   ferentiation (TND) and land-equivalent ratio (LER)
+208   are central to the reproduced analysis.                        To answer this question, the authors modelled                       243
+
+209      Temporal niche differentiation measures the dif-         the relationship between temporal niche differenti-                    244
+
+210   ference between the growing periods of the two              ation (TND) and the land-equivalent ratio (LER).                       245
+
+211   crop species in the case of relay intercropping.            They used a linear mixed-effects regression with                       246
+
+212   Relay intercropping is the combination with two             random intercepts for experiments nested within                        247
+
+213   species with differences in growing period, which           studies:                                                               248
+
+214   overlap only partially.                                           LERijk = β0 + β1 T N Dijk + uStudy,i
+                                                                                                                                  (3)    249
+                              Poverlap                                                + uExperiment,ij + ϵijk .
+215                 TND = 1 −          ,               (1)
+                              Psystem                             Here, β0 is the expected LER at TND = 0, and β1                        250
+                                                                  is the change in LER per unit increase in TND. The                     251
+216      where Poverlap is the simultaneous growth pe-            terms uStudy,i and uExperiment,ij capture variation                    252
+217   riod and Psystem spans the period from the sowing           between studies and nested experiments, respec-                        253
+218   of the first-sown crop till the harvest of the last-        tively, while ϵijk denotes residual variation.                         254
+219   harvested crop. A TND of 0 indicates complete
+220   overlap, while higher values indicate greater tem-          3.3    Experiment                                                      255
+221   poral separation (Figure 1). The maximum value              3.3.1 Extraction Approaches                                            256
+222   of TND is 1, indicating complete separation of
+                                                                  We designed three LLM-based approaches: direct                         257
+223   growing periods.
+                                                                  zero-shot prompting, a staged workflow, and a                          258
+224      The land-equivalent ratio measures how effi-
+                                                                  multi-agent system (MAS).                                              259
+225   ciently an intercropping system uses land relative
+                                                                    The prompts were developed based on refer-                           260
+226   to growing the two crop species separately. It is
+                                                                  enced research and expert knowledge of intercrop-                      261
+227   calculated as
+                                                                  ping meta-analysis. We tested different prompt                         262
+
+                             YIC1   YIC2                          versions during pilot runs and selected those that                     263
+228                LER =          +      ,             (2)        showed the best performance and stability. For                         264
+                             YSC1 YSC2
+
+                                                              3
+265   the staged workflow, we followed previous work               4.1     Evaluation Against Ground Truth                 312
+266   on separating evidence identification from record            We evaluate the outputs at the field level using com-   313
+267   construction. In the first step, a labeller identifies       parison rules tailored to different data types. were    314
+268   relevant values and tags the supporting text. In the         reviewed and agreed upon with the senior author         315
+269   second step, an extractor uses the labeled text to           of the reference study who was deeply involved          316
+270   construct the final records.                                 in curation of the ground-truth dataset. We first       317
+271      During the prototyping of the agentic approach,           introduce the types of extraction error and their       318
+272   we tested several designs, including ReAct (Yao              corresponding metrics, and then describe the eval-      319
+273   et al., 2023) and Reflexion (Shinn et al., 2023).            uation pipeline used to align records, apply the        320
+274   However, these repeated reasoning steps did not              comparison rules, and aggregate the results.            321
+275   consistently improve the output and often accumu-
+276   lated errors. Reflexion showed a similar problem:            4.1.1    Error Types                                    322
+
+277   even when previous error patterns were provided,             The output of the three approach (direct, workflow,     323
+278   the system did not reliably avoid them. We there-            MAS) are saved in csv format, same as ground            324
+279   fore selected a plan-and-execute design in which             truth. We classify the mismatches between the           325
+280   agents use tools to identify and label relevant ev-          predictions and ground truth into three types, each     326
+281   idence before producing and refining the records             measured by a corresponding metric:                     327
+282   (Erdogan et al., 2025). Further details about the              • Incorrectness: Extracted values disagree            328
+283   agents, prompts, and tools are provided in the Ap-               with the corresponding ground-truth values in       329
+284   pendix B.                                                        matched field values. Agreement is measured         330
+                                                                       by the similarity score, which ranges from 0        331
+285   3.3.2   Language Model Choice                                    to 1 and is averaged over fields where both         332
+                                                                       records contain a value.                            333
+286   Regarding the LLM choice, we used open-weight
+                                                                     • Hallucination: A predicted field contains a         334
+287   models available through the SURF research
+                                                                       value, but its ground-truth counterpart is miss-    335
+288   infrastructure. This choice was motivated by
+                                                                       ing. Populated fields in unmatched predicted        336
+289   concerns about sharing unpublished scientific
+                                                                       records also count as unsupported extractions.      337
+290   work with commercial LLM providers and the
+                                                                       The factual rate measures the proportion of         338
+291   possibility that related results could be pursued or
+                                                                       populated predicted fields that have a popu-        339
+292   released before the original researchers are ready
+                                                                       lated ground-truth counterpart                      340
+293   to publish (Buckmaster, 2026). The six LLMs
+                                                                     • Incompleteness: A ground-truth field contains       341
+294   included Q WEN 3.6-27B-FP8, Q WEN 3.6-35B-
+                                                                       a value, but its predicted counterpart is miss-     342
+295   A3B-FP8,         Q WEN 3.5-122B-A10B-NVFP4,
+                                                                       ing. Populated fields in unmatched ground-          343
+296   G EMMA -4-31B- IT-NVFP4, L LAMA -70B, and
+                                                                       truth records also count as omissions. The          344
+297   GPT-OSS-120B.
+                                                                       completeness rate measures the proportion of        345
+                                                                       populated ground-truth fields that have a popu-     346
+298   4   Evaluation                                                   lated predicted counterpart.                        347
+
+                                                                   4.1.2    Evaluation Metrics                             348
+299   We evaluate the extraction approaches in two
+300   steps: comparing the extraction outputs against the          Similarity Score We define a field-level similar-       349
+
+301   ground truth using a rigorous evaluation pipeline,           ity function that compares an extracted value with      350
+
+302   and reproducing the experiment conducted by hu-              its corresponding ground-truth value and returns a      351
+
+303   man researchers in the original meta-analysis study          score between 0 and 1. A score of 1 indicates full      352
+
+304   using the extraction outputs. The first step aims to         agreement under the applicable comparison rules,        353
+
+305   assess how well the LLM-based approaches agree               while 0 indicates no match. Intermediate scores         354
+
+306   with the human-annotated ground truth and how                represent partial agreement. The comparison de-         355
+
+307   performance differs across models and methods.               pends on the field type, as follows:                    356
+
+308   The second step examines whether the experiment                • Text and categorical values: After lowercas-        357
+309   can be reproduced using imperfect extraction out-                ing and removing whitespace, we compute             358
+310   puts and how much the resulting findings differ                  character-level ROUGE-L F1 (Lin, 2004). Iden-       359
+311   from those reported by the human researchers.                    tical normalized strings receive 1, while partial   360
+
+
+                                                               4
+361       overlap receives proportional credit.                  ness rate C using their harmonic mean:                  411
+362     • Numerical values: Values receive 1 when their
+363       relative difference is at most 2%; an exact                                    2Fadj C    2SF C
+                                                                          Ecombined =            =        .       (5)    412
+364       match is required when the ground truth is zero.                              Fadj + C   SF + C
+365       Values that match only after removing decimal
+                                                                    The resulting score ranges from 0 to 1, with         413
+366       points receive 0.5, reflecting a possible scale
+                                                                 higher values indicating better overall extraction      414
+367       or unit-conversion error. All other mismatches
+                                                                 quality. Multiplying similarity by the factual rate     415
+368       receive 0.
+                                                                 ensures that a populated predicted field contributes    416
+369     • Numerical values with units: Compatible
+                                                                 fully only when its value is also correct. The har-     417
+370       units are normalized and converted to the
+                                                                 monic mean follows the principle of the F-measure       418
+371       ground-truth unit before applying the 2% tol-
+                                                                 and produces a high combined score only when            419
+372       erance. If either unit is missing, we use the
+                                                                 both the similarity-adjusted factual rate and com-      420
+373       unit-free numerical comparison; incompatible
+                                                                 pleteness rate are high (Schütze et al., 2008). We      421
+374       or invalid quantity comparisons receive 0.
+                                                                 refer to this metric as the similarity-adjusted F1      422
+375     • Dates: We normalize calendar and Excel serial          score.                                                  423
+376       dates and sequentially compare full dates, par-
+377       tial month–day or month–year dates, relative           4.1.3    Evaluation pipeline                            424
+378       days or ranges, and years. Applicable rules re-        For each approach, we compare the extracted             425
+379       turn 1 or 0; otherwise, we use character-level         records with the ground-truth records from the          426
+380       ROUGE-L F1.                                            same paper. The evaluation includes papers with         427
+381     • Boolean and missing values: Equivalent                 an output CSV from at least one approach; missing       428
+382       Boolean forms, such as Yes, true, and 1, are           outputs from other approaches are treated as empty      429
+383       normalized before exact comparison. A com-             sets of records.                                        430
+384       parison receives 0 if either value is missing,            We first compare every predicted record with         431
+385       including when both are missing.                       every ground-truth record from the same paper. For      432
+386      Factual Rate To assess hallucination error, we          each pair, we calculate record-level similarity as      433
+387   define the factual rate as the proportion of non-          the arithmetic mean of the evaluated field scores.      434
+388   empty predicted fields that have a non-empty               To account for interchangeable crop ordering, we        435
+389   ground-truth counterpart after record alignment.           retain the higher-scoring original or swapped crop-     436
+390   This metric measures the presence of a correspond-         1/crop-2 assignment.                                    437
+391   ing value, regardless of whether the predicted and            We sort all candidate record pairs by descending     438
+392   ground-truth values agree.                                 similarity and perform greedy one-to-one matching.      439
+393      Completeness rate To assess omissions, we de-           A pair is accepted only if neither record has already   440
+394   fine the completeness rate as the proportion of non-       been matched. No minimum similarity score is            441
+395   empty ground-truth fields that have a non-empty            required.                                               442
+396   predicted counterpart after record alignment. This            After matching, each non-empty field in an un-       443
+397   metric measures how much of the ground-truth in-           matched predicted record is counted as an unsup-        444
+398   formation is covered by the extraction, regardless         ported extraction, while each non-empty field in        445
+399   of whether the values agree.                               an unmatched ground-truth record is counted as an       446
+
+400   Combined Evaluation Score The three metrics                omission. For matched records, we evaluate field        447
+
+401   capture complementary aspects of extraction qual-          presence and agreement using the retained crop          448
+
+402   ity. The similarity score S measures the correctness       orientation. We calculate paper-level similarity,       449
+
+403   of aligned values, the factual rate F penalizes un-        factual rate, and completeness rate, then average       450
+
+404   supported predictions, and the completeness rate C         these metrics across papers for each approach.          451
+
+405   penalizes omitted information. To summarize these
+                                                                 4.2     Reproducing the Reference Analysis              452
+406   dimensions in a single score, we first calculate a
+407   similarity-adjusted factual rate:                          Because the extracted datasets are imperfect, we        453
+                                                                 investigate whether they nevertheless support the       454
+408                     Fadj = S × F,                 (4)
+                                                                 same or a similar scientific conclusion as the ref-     455
+409      where S is the similarity score and F is the fac-       erence study. Automating meta-analysis should           456
+410   tual rate. We then combine Fadj with the complete-         support not only accurate extraction but also the       457
+
+
+                                                             5
+458   complete process from the literature to a final con-          LLM                  Direct Workflow     MAS
+459   clusion. We therefore examine how extraction er-              Q WEN 3.6-27B     48/0/42     41/5/44   50/12/28
+460   rors propagate into the downstream analysis and               Q WEN 3.6-35B-A3B 86/0/4      76/0/14    57/29/4
+461   whether they alter its findings.                              G EMMA -4-31B     69/1/20     65/0/25    74/6/10
+                                                                    Q WEN 3.5-122B    71/0/19     68/0/22   46/34/10
+462      For each model and extraction approach, we first           L LAMA -70B       74/1/15     73/3/14   55/22/13
+463   construct the variables required for the regression.          GPT-OSS-120B      75/1/14     73/2/15    68/13/9
+464   When a usable LER value is reported in an ex-
+465   tracted record, we use that value directly. When           Table 1: Run outcomes across the 90 target papers. Each
+466   LER is unavailable, we calculate it from the four          cell reports non-empty/empty/missing outputs. Direct
+467   required sole-crop and intercrop yields:                   denotes the direct LLM approach, Workflow the staged
+                                                                 workflow, and MAS the multi-agent system.
+                             YIC1   YIC2
+468                 LER =         +      .            (6)
+                             YSC1 YSC2                           5.1   Field-Level Extraction Results                      506
+
+469   Records without either a reported LER or all four          We applied the evaluation pipeline described above        507
+470   required yields are excluded. We similarly use the         to the outputs of each LLM and extraction ap-             508
+471   extracted TND when available or calculate it from          proach. Figure 2 presents the mean similarity-            509
+472   the crops’ sowing and harvest dates. Only records          adjusted F1 score for all papers included in the          510
+473   for which both LER and TND can be obtained are             evaluation of each model. A paper is included             511
+474   retained.                                                  when at least one of the three approaches produces        512
+475      Within each study, the retained records are             an output CSV. For the included papers, a missing         513
+476   matched one-to-one with the reference records us-          or empty output from an approach is evaluated as          514
+477   ing experimental-design information only. LER,             an empty prediction.                                      515
+478   TND, yields, and dates are not used during this
+479   matching. The matched ground-truth Experimen-
+480   tal ID is used solely to recover the nested group-
+481   ing structure required by the statistical model; no
+482   ground-truth outcome values are introduced into
+483   the reproduced analysis.
+484      We apply the linear mixed-effects model de-
+485   scribed in the previous section, with LER as the
+486   response, TND as the fixed-effect predictor, and
+487   random intercepts for experiments nested within
+488   studies, fitting it separately for each model and
+489   extraction approach.
+                                                                 Figure 2: Mean similarity-adjusted F1 by LLM and
+490   5   Results                                                extraction approach. Papers with output from at least
+                                                                 one approach are included; missing or empty outputs
+491   We applied all three extraction approaches with            are treated as empty predictions.
+492   each LLM to the same 90 papers. We counted
+493   runs that produced a parsable table with at least             Figure 2 shows that the direct LLM approach            516
+494   one record. Individual LLM requests had a three-           achieves the highest score for all six models. Per-       517
+495   minute timeout, although multi-stage runs could            formance also varies across LLMs, but the most            518
+496   take longer. Failures included API or parsing er-          consistent pattern is the difference between extrac-      519
+497   rors, empty tables, and missing outputs. Table 1           tion approaches: increasing method complexity             520
+498   summarizes the resulting coverage.                         does not improve extraction quality. Contrary to          521
+499      For each model, the evaluation includes papers          our initial expectation, the staged workflow and          522
+500   for which at least one approach produced an output         multi-agent system generally perform worse than           523
+501   CSV. Within this set, a missing or empty output            the direct approach.                                      524
+502   from a particular approach is treated as an empty             This comparison is partly influenced by differ-        525
+503   prediction. Consequently, all non-empty ground-            ences in run coverage. As shown in Table 1, the           526
+504   truth fields for that approach are counted as omis-        direct approach produces more non-empty outputs           527
+505   sions.                                                     overall. We therefore conduct an additional com-          528
+
+
+                                                             6
+                                                                                                   24.0 Workflow (off-scale)                      10.6 MAS (off-scale)
+529   parison restricted, for each model, to papers for
+530   which all three approaches produce at least one
+531   structured record. Figure 3 presents the results on                  2.0   4 values > 2.0    23.0                        5 values > 2.0      9.5
+                                                                                                          0.00          0.49                             0.00            0.56
+532   this common-output subset.                                           1.5
+
+                                                                           1.0
+
+                                                                           0.5
+                                                                                 gpt-oss-120b                                  gemma-4-31B
+                                                                           0.0
+                                                                           2.0   10 values > 2.0
+
+
+                                                                           1.5
+
+
+
+
+                                                                     LER
+                                                                           1.0
+
+                                                                           0.5
+                                                                                 Qwen3.6-35B                                   Qwen3.6-27B
+                                                                           0.0
+                                                                           2.0   8 values > 2.0
+
+
+                                                                           1.5
+      Figure 3: Mean similarity-adjusted F1 scores restricted,             1.0
+      for each LLM, to papers for which all three extraction
+      approaches produced at least one structured record.                  0.5
+                                                                                 Qwen3.5-122B                                  Llama-70B
+                                                                           0.0        0.25 0.50                  0.75   1.00        0.25           0.50         0.75   1.00
+533      The restricted comparison leads to a similar over-                                                                TND
+                                                                                       Direct                GT 1 90 ( =0.290)                  Published GT ( 0.211)
+534   all conclusion. The direct approach obtains the                                  Workflow              95% slope interval                 Above plotting range
+                                                                                       MAS
+535   highest score for four of the six models. The work-
+536   flow is slightly better for Qwen3.6-35B, while the
+                                                                     Figure 4: Estimated relationship between TND and LER
+537   multi-agent system is slightly better for Qwen3.5-             for each LLM and extraction approach, compared with
+538   122B. Thus, although the ranking is not identical              the ground-truth baselines. Insets show fits outside the
+539   for every model, the results provide no consistent             main plotting range.
+540   evidence that increasing method complexity im-
+541   proves extraction quality.
+                                                                     the direct Qwen3.6-27B estimate (β = 0.295) is                                                             564
+542   5.2   Downstream Reproduction Results                          numerically closest to the ground truth, but its con-                                                      565
+                                                                     fidence interval includes zero. The GPT-OSS multi-                                                         566
+543   We reproduce the reference analysis by fitting the
+                                                                     agent fit produces a coefficient estimate but no valid                                                     567
+544   same linear mixed-effects model specification sep-
+                                                                     standard error or confidence interval.                                                                     568
+545   arately to the data produced by each LLM and
+                                                                        Overall, the automatically extracted data often                                                         569
+546   extraction method, as described in Section 4.2. Be-
+                                                                     recover the direction of the relationship, particu-                                                        570
+547   cause extraction was conducted on 90 papers, we
+                                                                     larly when using the direct approach, but they do                                                          571
+548   use the model fitted to the corresponding 90 ground-
+                                                                     not reliably reproduce its magnitude or statistical                                                        572
+549   truth studies as the primary reference. This linear
+                                                                     certainty. The results therefore support the use of                                                        573
+550   regression model estimates a positive TND effect
+                                                                     generative-AI extraction for qualitative exploration,                                                      574
+551   of β = 0.290 with a 95% confidence interval of
+                                                                     but not as a substitute for human-curated data when                                                        575
+552   [0.166, 0.413]. We also show the effect reported
+                                                                     precise quantitative conclusions are required.                                                             576
+553   for the complete reference dataset of 100 studies
+                                                                        Taken together, the field-level evaluation and                                                          577
+554   (β ≈ 0.211).
+                                                                     reproduction experiment provide no consistent evi-                                                         578
+555      Figure 4 shows the reproduced relationships.
+                                                                     dence that increasing method complexity improves                                                           579
+556   The direct approach produces a positive TND co-
+                                                                     extraction quality or downstream analytical relia-                                                         580
+557   efficient for all six LLMs, and five of these six
+                                                                     bility. We discuss possible explanations for this                                                          581
+558   estimates are significantly greater than zero. The
+                                                                     result in Section 6.1.                                                                                     582
+559   Qwen3.6-35B model provides the most consistent
+560   qualitative reproduction: all three extraction meth-           6       Discussion & Conclusion                                                                            583
+561   ods produce significant positive coefficients. How-
+562   ever, their estimated magnitudes are larger than               Compared with the ground truth, direct zero-shot                                                           584
+563   the 90-study ground-truth coefficient. In contrast,            extraction was generally the strongest approach,                                                           585
+
+
+                                                                 7
+586   although none of the approaches was fully accurate.          cropping research grows, there is an opportunity to     636
+587   It consistently recovered the positive relationship          standardize and streamline this process and make        637
+588   between TND and LER, but not the magnitude of                greater use of automated extraction.                    638
+589   the reference effect.                                           Our results suggest that LLMs could reduce           639
+                                                                   some of this manual work, but their outputs still re-   640
+590   6.1   Complexity Trap                                        quire careful checking. Direct zero-shot extraction     641
+591   We manually examined the outputs for a fixed-seed            was generally the most reliable approach, although      642
+592   sample of eight papers to better understand why              many records and fields remained missing, incor-        643
+593   the structured pipelines (workflow and MAS) per-             rect, or wrongly associated. This provides cautious     644
+594   formed less well on average. The two-step work-              support for earlier findings on LLM-based infor-        645
+595   flow sometimes lost context when papers were re-             mation extraction for evidence synthesis (Polak         646
+596   duced to tagged evidence blocks, while MAS could             and Morgan, 2024). In the downstream analysis,          647
+597   carry mistakes from its initial direct extraction into       direct extraction recovered a positive relationship     648
+598   later steps. In this sample, MAS produced eight              between TND and LER across all six models, but          649
+599   records for a paper containing three ground-truth            the estimated effects were generally larger than the    650
+600   records, fifteen for a paper containing two, and no          reference effect and varied in precision.               651
+601   records for two other papers. Additional stages may             LLMs may also reduce the time required for           652
+602   help in some cases, but they also create more oppor-         evidence synthesis by supporting study screening        653
+603   tunities to omit, duplicate, or incorrectly associate        and full-text eligibility assessment, although their    654
+604   evidence. The stronger overall performance of di-            outputs must still be checked before drawing sci-       655
+605   rect extraction may therefore be partly explained            entific conclusions (Delgado-Chaves et al., 2025;       656
+606   by its shorter processing path.                              Taherinezhad et al., 2026; Wang et al., 2025).          657
+607      These observations align with reports of data
+608   gaps and referential drift at agent handoffs (Lin            6.3   Relevance Beyond Intercropping                    658
+
+609   et al., 2026), error amplification in sequential sys-        Intercropping studies are particularly difficult to     659
+610   tems (Kim et al., 2026), and stronger single-agent           conduct meta-analysis on because of their nested        660
+611   performance on geometry benchmarks (E Sobhani                experimental structure and the complex relation-        661
+612   et al., 2026). Complex pipelines therefore depend            ships among treatments, crops, and values reported      662
+613   on a good fit with the task and careful checking of          across tables. Similar challenges occur in other        663
+614   intermediate outputs.                                        domains, such as clinical trials (Nye et al., 2018)     664
+                                                                   and materials-science datasets (Zheng et al., 2023).    665
+615   6.2   Toward More Efficient Evidence Synthesis                  The results from direct zero-shot prompting sug-     666
+616   Extracting data for an intercropping meta-analysis           gest that this approach may be transferred to other     667
+617   is time-consuming. Papers may report several ex-             domains. However, its precision remains limited,        668
+618   periments across different sites or years, with mul-         and recovering the direction of a relationship ap-      669
+619   tiple treatments in each experiment. Researchers             pears easier than estimating its magnitude accu-        670
+620   must therefore identify the appropriate intercrop            rately. Domain-specific post-training may therefore     671
+621   and sole-crop treatments and decide which compar-            be needed to improve performance.                       672
+622   isons are scientifically meaningful.
+623      The process is also iterative because intercrop-          Generative AI usage                                     673
+624   ping meta-analysis is not yet fully standardized
+                                                                   AI coding tools (Claude, Cursor, Codex) were used       674
+625   and new response metrics continue to be developed
+                                                                   to co-write parts of the code base and for minor        675
+626   and evaluated. Researchers often move repeatedly
+                                                                   copy-editing of the manuscript. All code has been       676
+627   between data retrieval, analysis, and conceptualiza-
+                                                                   manually verified and the authors take full respon-     677
+628   tion before arriving at an extraction and analysis
+                                                                   sibility of all presented methods and results.          678
+629   strategy that fits the available evidence. Experi-
+630   ence from conducting the reference meta-analysis
+631   suggests that a small meta-analysis, such as an              References                                              679
+632   MSc thesis project, may take about six months. A
+                                                                   John M. Antle, James W. Jones, and Cynthia E. Rosen-    680
+633   larger meta-analysis covering 50–150 studies may               zweig. 2017. Next generation agricultural system      681
+634   require two to three years of a PhD project (Yu                data, models and knowledge products: Introduction.    682
+635   et al., 2015). As experience in synthesizing inter-            Agricultural Systems, 155:186–190.                    683
+
+
+                                                               8
+684   Rob W. Brooker, Alison E. Bennett, Wen-Feng Cong,                  Swakkhar Shatabda. 2026. Do multi-agents solve            741
+685     Tim J. Daniell, Timothy S. George, Paul D. Hal-                  better than single? evaluating agentic frameworks         742
+686     lett, Cathy Hawes, Pietro P. M. Iannetta, Hamlyn G.              for diagram-grounded geometry problem solving and         743
+687     Jones, Alison J. Karley, Long Li, Blair M. McKenzie,             reasoning. In Proceedings of the 19th Conference of       744
+688     Robin J. Pakeman, Eric Paterson, Christian Schöb,                the European Chapter of the Association for Com-          745
+689     Jianbo Shen, Geoff Squire, Christine A. Watson,                  putational Linguistics (Volume 4: Student Research        746
+690     Chaochun Zhang, and 3 others. 2015. Improving                    Workshop), pages 27–47, Rabat, Morocco. Associa-          747
+691     intercropping: a synthesis of research in agronomy,              tion for Computational Linguistics.                       748
+692     plant physiology and ecology. New Phytologist,
+693     206(1):107–117.                                                Lutfi Eren Erdogan, Nicholas Lee, Sehoon Kim, Suhong        749
+                                                                         Moon, Hiroki Furuta, Gopala Anumanchipalli, Kurt          750
+694   Rob W. Brooker, Alison E. Bennett, Wen-Feng Cong,                  Keutzer, and Amir Gholami. 2025. Plan-and-act:            751
+695     Tim J. Daniell, Timothy S. George, Paul D. Hal-                  Improving planning of agents for long-horizon tasks.      752
+696     lett, Cathy Hawes, Pietro P. M. Iannetta, Hamlyn G.              Preprint, arXiv:2503.09572.                               753
+697     Jones, Alison J. Karley, Long Li, Blair M. McKenzie,
+698     Robin J. Pakeman, Eric Paterson, Christian Schöb,              Veena G., Vani Kanjirangat, and Deepa Gupta. 2023.          754
+699     Jianbo Shen, Geoff Squire, Christine A. Watson,                  Agroner: An unsupervised agriculture named en-            755
+700     Chaochun Zhang, and 3 others. 2014. Improving                    tity recognition using weighted distributional se-        756
+701     intercropping: a synthesis of research in agronomy,              mantic model. Expert Systems with Applications,           757
+702     plant physiology and ecology. New Phytologist,                   229:120440.                                               758
+703     206(1):107–117.
+                                                                       H. Charles J. Godfray, John R. Beddington, Ian R.           759
+704   Tristan Buckmaster. 2026. Public statement. Accessed:              Crute, Lawrence Haddad, David Lawrence, James F.          760
+705      2026-09-11.                                                     Muir, Jules Pretty, Sherman Robinson, Sandy M.            761
+                                                                         Thomas, and Camilla Toulmin. 2010. Food security:         762
+706   Max Callaghan, Carl-Friedrich Schleussner, Shruti Nath,            The challenge of feeding 9 billion people. Science,       763
+707     Quentin Lejeune, Thomas R. Knutson, Markus Re-                   327(5967):812–818.                                        764
+708     ichstein, Gerrit Hansen, Emily Theokritoff, Ma-
+                                                                       Patricio Grassini, Lenny G.J. van Bussel, Justin            765
+709     rina Andrijevic, Robert J. Brecha, Michael Hegarty,
+                                                                         Van Wart, Joost Wolf, Lieven Claessens, Haishun           766
+710     Chelsea Jones, Kaylin Lee, Agathe Lucas, Nicole
+                                                                         Yang, Hendrik Boogaard, Hugo de Groot, Martin K.          767
+711    van Maanen, Inga Menke, Peter Pfleiderer, Burcu
+                                                                         van Ittersum, and Kenneth G. Cassman. 2015. How           768
+712    Yesil, and Jan C. Minx. 2021. Machine-learning-
+                                                                         good is good enough? data requirements for reliable       769
+713     based evidence and attribution mapping of 100, 000
+                                                                         crop yield simulations and yield-gap analysis. Field      770
+714     climate impact studies. Nature Climate Change,
+                                                                         Crops Research, 177:49–63.                                771
+715    11(11):966–972.
+                                                                       Sonakshi Gupta, Akhlak Mahmood, Pranav Shetty,              772
+716   Abir Chebbi, Guido Kniesel, Nabil Abdennadher, and                 Aishat Adeboye, and Rampi Ramprasad. 2024. Data           773
+717     Giovanna Dimarzo. 2024. Enhancing named entity                   extraction from polymer literature using large lan-       774
+718     recognition for agricultural commodity monitoring                guage models. Communications Materials, 5(1).             775
+719     with large language models. In Proceedings of the
+720     4th Workshop on Machine Learning and Systems,                  Jessica Gurevitch, Julia Koricheva, Shinichi Naka-          776
+721     EuroSys ’24, page 208–213. ACM.                                   gawa, and Gavin Stewart. 2018. Meta-analysis             777
+                                                                          and the science of research synthesis. Nature,           778
+722   J Connolly, HC Goma, and K Rahim. 2001. The infor-                  555(7695):175–182.                                       779
+723      mation content of indicators in intercropping research.
+724      Agriculture, ecosystems & environment, 87(2):191–             Dean P. Holzworth, Neil I. Huth, Peter G. deVoil, Eric J.   780
+725      207.                                                            Zurcher, Neville I. Herrmann, Greg McLean, Karine         781
+                                                                         Chenu, Erik J. van Oosterom, Val Snow, Chris Mur-         782
+726   John Dagdelen, Alexander Dunn, Sanghoon Lee,                       phy, Andrew D. Moore, Hamish Brown, Jeremy P.M.           783
+727     Nicholas Walker, Andrew S. Rosen, Gerbrand Ceder,                Whish, Shaun Verrall, Justin Fainges, Lindsay W.          784
+728     Kristin A. Persson, and Anubhav Jain. 2024. Struc-               Bell, Allan S. Peake, Perry L. Poulton, Zvi Hochman,      785
+729     tured information extraction from scientific text with           and 27 others. 2014. Apsim – evolution towards a          786
+730     large language models. Nature Communications,                    new generation of agricultural systems simulation.        787
+731     15(1).                                                           Environmental Modelling & Software, 62:327–350.           788
+
+732   Fernando M. Delgado-Chaves, Matthew J. Jennings, An-             Sarthak Jain, Madeleine van Zuylen, Hannaneh Ha-            789
+733     tonio Atalaia, Justus Wolff, Rita Horvath, Zeinab M.             jishirzi, and Iz Beltagy. 2020. SciREX: A challenge       790
+734     Mamdouh, Jan Baumbach, and Linda Baumbach.                       dataset for document-level information extraction. In     791
+735     2025. Transforming literature screening: The emerg-              Proceedings of the 58th Annual Meeting of the Asso-       792
+736     ing role of large language models in systematic re-              ciation for Computational Linguistics, pages 7506–        793
+737     views. Proceedings of the National Academy of Sci-               7516, Online. Association for Computational Lin-          794
+738     ences, 122(2).                                                   guistics.                                                 795
+
+739   Mahbub E Sobhani, Md. Faiyaz Abdullah Sayeedi, Mo-               Yubin Kim, Ken Gu, Chanwoo Park, Chunjong Park,             796
+740    hammad Nehad Alam, Proma Hossain Progga, and                      Samuel Schmidgall, A. Ali Heydari, Yao Yan, Zhihan        797
+
+
+                                                                   9
+798     Zhang, Yuchen Zhuang, Yun Liu, Mark Malhotra,                 Giovanni    Tamburini,        Riccardo    Bommarco,        854
+799     Paul Pu Liang, Hae Won Park, Yuzhe Yang, Xuhai                  Thomas Cherico Wanger, Claire Kremen, Marcel GA          855
+800     Xu, Yilun Du, Shwetak Patel, Tim Althoff, Daniel                Van Der Heijden, Matt Liebman, and Sara Hallin.          856
+801     McDuff, and Xin Liu. 2026. Towards a science of                 2020. Agricultural diversification promotes multiple     857
+802     scaling agent systems. Preprint, arXiv:2512.08296.              ecosystem services without compromising yield.           858
+                                                                        Science advances, 6(45):eaba1715.                        859
+803   Takeshi Kojima, Shixiang Shane Gu, Machel Reid, Yu-
+804     taka Matsuo, and Yusuke Iwasawa. 2023. Large                  Bin Wang, Tianyao He, Linke Ouyang, Fan Wu,                860
+805     language models are zero-shot reasoners. Preprint,              Zhiyuan Zhao, Tao Chu, Yuan Qu, Zhenjiang Jin,           861
+806     arXiv:2205.11916.                                               Weijun Zeng, Ziyang Miao, et al. 2026. Mineru2.          862
+                                                                        5-pro: Pushing the limits of data-centric document       863
+807   Bohan Lin, Kuo Yang, Zelin Tan, Yingchuan Lai,                    parsing at scale. arXiv preprint arXiv:2604.04771.       864
+808     Chen Zhang, Guibin Zhang, Xinlei Yu, Miao Yu,
+809     Xu Wang, Yudong Zhang, and Yang Wang. 2026.                   Zifeng Wang, Lang Cao, Qiao Jin, Joey Chan, Nicholas       865
+810     Agentask: Multi-agent systems need to ask. Preprint,             Wan, Behdad Afzali, Hyun-Jin Cho, Chang-In Choi,        866
+811     arXiv:2510.07593.                                                Mehdi Emamverdi, Manjot K. Gill, Sun-Hyung Kim,         867
+                                                                        Yijia Li, Yi Liu, Yiming Luo, Hanley Ong, Justin F.      868
+812   Chin-Yew Lin. 2004. ROUGE: A package for auto-                     Rousseau, Irfan Sheikh, Jenny J. Wei, Ziyang Xu,        869
+813     matic evaluation of summaries. In Text Summariza-                and 5 others. 2025. A foundation model for human-       870
+814     tion Branches Out, pages 74–81, Barcelona, Spain.                ai collaboration in medical literature mining. Nature   871
+815     Association for Computational Linguistics.                       Communications, 16(1).                                  872
+
+816   Benjamin Nye, Junyi Jessy Li, Roma Patel, Yinfei Yang,          Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak           873
+817     Iain Marshall, Ani Nenkova, and Byron Wallace.                  Shafran, Karthik Narasimhan, and Yuan Cao. 2023.         874
+818     2018. A corpus with multi-level annotations of pa-              React: Synergizing reasoning and acting in language      875
+819     tients, interventions and outcomes to support lan-              models. Preprint, arXiv:2210.03629.                      876
+820     guage processing for medical literature. In Proceed-
+821     ings of the 56th Annual Meeting of the Association            Yang Yu, T. J. Stomph, David Makowski, and Wopke           877
+822     for Computational Linguistics (Volume 1: Long Pa-               van der Werf. 2015. Temporal niche differentia-          878
+823     pers), page 197–207. Association for Computational              tion increases the land equivalent ratio of annual in-   879
+824     Linguistics.                                                    tercrops: A meta-analysis. Field Crops Research,         880
+                                                                        184:133–144.                                             881
+825   Maciej P. Polak and Dane Morgan. 2024. Extracting ac-
+826     curate materials data from research papers with con-          Jiayi Zhang, Jinyu Xiang, Zhaoyang Yu, Fengwei Teng,       882
+827    versational language models and prompt engineering.               Xionghui Chen, Jiaqi Chen, Mingchen Zhuge, Xin          883
+828    Nature Communications, 15(1).                                     Cheng, Sirui Hong, Jinlin Wang, Bingnan Zheng,          884
+                                                                         Bang Liu, Yuyu Luo, and Chenglin Wu. 2025. Aflow:       885
+829   Saed Rezayi, Zhengliang Liu, Zihao Wu, Chandra                     Automating agentic workflow generation. Preprint,       886
+830     Dhakal, Bao Ge, Chen Zhen, Tianming Liu, and                     arXiv:2410.10762.                                       887
+831     Sheng Li. 2022. Agribert: Knowledge-infused agri-
+832     cultural language models for matching food and nutri-         Zhiling Zheng, Oufan Zhang, Christian Borgs, Jen-          888
+833     tion. In Proceedings of the Thirty-First International          nifer T. Chayes, and Omar M. Yaghi. 2023. Chatgpt        889
+834     Joint Conference on Artificial Intelligence, IJCAI-             chemistry assistant for text mining and the prediction   890
+835     2022, page 5150–5156. International Joint Confer-               of mof synthesis. Journal of the American Chemical       891
+836     ences on Artificial Intelligence Organization.                  Society, 145(32):18048–18062.                            892
+
+837   Hinrich Schütze, Christopher D Manning, and Prab-
+838     hakar Raghavan. 2008. Introduction to information
+839     retrieval, volume 39. Cambridge University Press
+840     Cambridge.
+841   Noah Shinn, Federico Cassano, Edward Berman, Ash-
+842     win Gopinath, Karthik Narasimhan, and Shunyu Yao.
+843     2023. Reflexion: Language agents with verbal rein-
+844     forcement learning. Preprint, arXiv:2303.11366.
+845   Anne J. Sietsma, Emily Theokritoff, Robbert Bies-
+846     broek, Iván Villaverde Canosa, Adelle Thomas, Max
+847     Callaghan, Jan C. Minx, and James D. Ford. 2024.
+848     Machine learning evidence map reveals global differ-
+849     ences in adaptation action. One Earth, 7(2):280–292.
+850   Moein Taherinezhad, Sebastian Maier, Gerardo
+851    Vitagliano, Francesco Pierri, and Stefan Feuerriegel.
+852    2026. Autosynthesis: An agentic system for auto-
+853    mated meta-analysis. arXiv preprint.
+
+
+                                                                 10
+A       Schema Definition                                                                                                              893
+
+
+                        Table 2: Definitions of the 42 fields in an extracted intercropping record.
+
+Field                           Definition
+Year of data                    Year or years in which the experimental data were collected.
+Duration of experiment          Total duration of the experiment, expressed in days, years, or growing seasons.
+Experimental design             Experimental layout used in the study, such as a randomized complete block design.
+Sowing date 1                   Date on which the first crop species in the intercropping system was sown.
+Sowing date 2                   Date on which the second crop species in the intercropping system was sown.
+Harvest date 1                  Date on which the first crop species was harvested.
+Harvest date 2                  Date on which the second crop species was harvested.
+TND                             Temporal niche differentiation index explicitly reported in the paper.
+Lat                             Latitude of the experimental site in decimal degrees.
+Lon                             Longitude of the experimental site in decimal degrees.
+Continent                       Continent in which the experimental site is located.
+Crop species 1                  Common or scientific name of the first crop species in the intercropping system.
+Crop species 2                  Common or scientific name of the second crop species in the intercropping system.
+Crop type 1                     Agronomic functional type of the first crop, such as cereal, legume, oilseed, or root crop.
+Crop type 2                     Agronomic functional type of the second crop, such as cereal, legume, oilseed, or root crop.
+Fodder crop 1                   Boolean indicator of whether the first crop is grown for fodder, forage, or biomass rather than
+                                for grain or seed.
+Fodder crop 2                   Boolean indicator of whether the second crop is grown for fodder, forage, or biomass rather than
+                                for grain or seed.
+Intercropping pattern           Spatial arrangement of the crops, classified as row, strip, or mixed intercropping.
+Density ic 1                    Plant density of the first crop species in the intercropping treatment.
+Density ic 2                    Plant density of the second crop species in the intercropping treatment.
+Density sc 1                    Plant density of the first crop species when grown as a sole crop.
+Density sc 2                    Plant density of the second crop species when grown as a sole crop.
+RDT                             Relative density total of the intercropping system when explicitly reported.
+N input SC1                     Amount of nitrogen fertilizer applied to the sole-crop treatment of the first crop species.
+N input SC2                     Amount of nitrogen fertilizer applied to the sole-crop treatment of the second crop species.
+N input IC1                     Amount of nitrogen fertilizer attributed to the first crop species in the intercropping treatment.
+N input IC2                     Amount of nitrogen fertilizer attributed to the second crop species in the intercropping treatment.
+N total in IC                   Total amount of nitrogen fertilizer applied to the intercropping treatment.
+N Unit                          Unit used for the reported nitrogen fertilizer inputs.
+P input SC1                     Amount of phosphorus fertilizer applied to the sole-crop treatment of the first crop species.
+P input SC2                     Amount of phosphorus fertilizer applied to the sole-crop treatment of the second crop species.
+P input IC1                     Amount of phosphorus fertilizer attributed to the first crop species in the intercropping treatment.
+P input IC2                     Amount of phosphorus fertilizer attributed to the second crop species in the intercropping
+                                treatment.
+P total in IC                   Total amount of phosphorus fertilizer applied to the intercropping treatment.
+P Unit                          Unit used for the reported phosphorus fertilizer inputs.
+Unified yield IC1               Yield of the first crop species in the intercropping treatment, converted to a common unit.
+Unified yield IC2               Yield of the second crop species in the intercropping treatment, converted to a common unit.
+Unified yield SC1               Yield of the first crop species in its corresponding sole-crop treatment, converted to a common
+                                unit.
+Unified yield SC2               Yield of the second crop species in its corresponding sole-crop treatment, converted to a
+                                common unit.
+LER1                            Partial land-equivalent ratio of the first crop species when explicitly reported.
+LER2                            Partial land-equivalent ratio of the second crop species when explicitly reported.
+LER                             Total land-equivalent ratio of the intercropping treatment when explicitly reported.
+
+
+
+
+                                                               11
+894   B     Prompts and Agent Configurations                                   Remove duplicates only when two records have          955
+                                                                               the same year, treatment level, cropping system,      956
+895   B.1    Direct Zero-Shot Prompt                                           and species context. When uncertain, keep both        957
+                                                                               records.                                              958
+896   The direct approach used the following prompt tem-
+                                                                               Target data                                           959
+897   plate. At runtime, [SCHEMA] was replaced by the
+898   complete 42-field schema and [PAPER CONTENT]                             Include field-measured yields, dry matter, densi-     960
+                                                                               ties, nutrient applications, and other values de-     961
+899   by the paper text. The model returned structured                         fined by the schema. Exclude model evaluation         962
+900   output conforming to the same schema.                                    metrics, predictions, and correlation-only statis-    963
+                                                                               tics.                                                 964
+901         You are an expert agricultural data extraction spe-
+902         cialist. Your task is to extract measured crop yield               Extract all rows supported by the main results        965
+903         information and related agronomic and contextual                   tables. The number of records should generally        966
+904         variables from scientific research papers. Maxi-                   be similar to, or greater than, the number of dis-    967
+905         mize recall: your output list should include every                 tinct table rows and relevant treatment levels. For   968
+906         distinct experiment-level or table-level data row                  intercropping tables, produce separate records or     969
+907         supported by the paper, rather than a summary.                     fill the sole-crop and intercrop yield columns for    970
+                                                                               each row. Dry-matter measurements reported in         971
+908         Step 1: Anchor identification                                      units such as g m−2 and kg ha−1 are valid.            972
+909         Scan the entire content, including paragraphs, all                 Meta-analytic schema                                  973
+910         tables row by row, captions, footnotes, and sup-
+911         plements. Locate every sentence or cell report-                    [SCHEMA]                                              974
+912         ing measured yields, densities, inputs, or other                   Analyze the following paper and extract all           975
+913         schema fields. Ignore model evaluation metrics,                    records according to the schema:                      976
+914         yield gaps, and simulated outputs.
+                                                                               [PAPER CONTENT]                                       977
+915         Step 2: Contextual reasoning
+916         For each anchor, gather the associated context,                    Extract all records from the paper following the      978
+917         including year, treatment, fertilization level, crop-              schema. Prefer too many distinct records over too     979
+918         ping system, species, and block or plot when re-                   few.                                                  980
+919         ported.
+920         Step 3: Completeness, evidence, and confi-                   B.2     Staged Workflow Prompts                             981
+921         dence
+                                                                         The staged workflow consisted of two steps. The             982
+922         If a field is missing from a record, search the
+923         following locations before leaving it null:                  first step selected and tagged schema-relevant ev-          983
+                                                                         idence from the paper. The second step used the             984
+924             • Year, season, or duration: abstract, methods,
+925               table-row labels, and column headers.                  tagged text to produce the structured records.              985
+926             • Location or coordinates: site description,
+927               methods, and tables.                                   B.2.1    Step 1: Evidence Labelling                         986
+928             • Crops, species, or intercropping pattern: ab-
+929               stract, methods, and table or figure labels.           The following prompt was used for the labelling             987
+930             • Treatments: experimental design, methods,              step. [SCHEMA FIELDS] was replaced by the names             988
+931               and table columns.                                     and descriptions of all schema fields, and [PAPER           989
+932             • Densities, inputs, and nutrients: methods
+933               and numerical table cells.                             CONTENT] was replaced by the paper text.                    990
+934             • Yield columns: map sole-crop and intercrop
+935               yields to the corresponding schema fields                    You are a document labeller for downstream struc-     991
+936               for each row.                                                tured extraction.                                     992
+
+937         Assign confidence as high, medium, or low, but                     Task: Produce a single field labeled_document         993
+938         still output the row when its values are supported                 containing only the paragraphs, table blocks, cap-    994
+939         by the paper.                                                      tions, and footnotes that hold schema-relevant ev-    995
+                                                                               idence. Drop all other text. Within each retained     996
+940         Step 4: Record construction                                        block, add inline XML tags so that the next step      997
+941         Build one schema record for each distinct experi-                  can produce one output record per experimental        998
+942         mental observation:                                                row.                                                  999
+
+943             • Treat each row of a main results table, such                 Schema fields: Tag names must match these field       1000
+944               as a distinct year × treatment × system                      names exactly:                                        1001
+945               combination, as a separate record.                           [SCHEMA FIELDS]                                       1002
+946             • When a table contains separate columns for
+947               the two species and their intercrop yields,                  Keep:                                                 1003
+948               fill all applicable yield fields for that row.
+949             • For factorial or split-plot experiments, cre-                   • Yield, density, nutrient, experimental-          1004
+950               ate a separate record for each factor combi-                      design, crop, site, year, and treatment val-     1005
+951               nation with its own numerical result.                             ues.                                             1006
+952             • Keep the original units and do not convert                      • Results tables together with their captions      1007
+953               them. Use null only when a field is not                           and footnotes. Retain the complete table         1008
+954               reported for that row.                                            rather than a summary.                           1009
+
+
+                                                                    12
+1010            • Methods sentences reporting densities, fer-                       • Examine the complete tagged document,            1067
+1011              tilizer inputs, experimental design, sowing                         including the methods, results, and all re-      1068
+1012              or harvest dates, or geographical coordi-                           tained tables.                                   1069
+1013              nates.                                                            • Use null only when a field is genuinely          1070
+1014            • Any sentence containing a schema-relevant                           unavailable after examining all relevant evi-    1071
+1015              number or label.                                                    dence.                                           1072
+                                                                                    • When uncertain between one combined              1073
+1016        Drop:
+                                                                                      record and several records, prefer separate      1074
+1017            • Sections without schema-relevant values,                            records that preserve the structure of the       1075
+1018              such as general background, acknowledge-                            source table.                                    1076
+1019              ments, references, and unrelated discussion.
+1020            • Do not rewrite or paraphrase retained text.           B.3     Agents and Tools                                       1077
+1021              Copy the source wording and only add
+1022              XML tags.                                             The MAS used a planning agent followed by four                 1078
+
+1023        Tagging rules:
+                                                                        execution agents. Table ?? summarizes their roles              1079
+                                                                        and tool access. Only the labeller used a callable             1080
+1024            • Wrap every schema-relevant number or
+1025              label using <FieldName>exact source
+                                                                        tool; the other agents operated on the document                1081
+1026              text</FieldName>.                                     and intermediate outputs provided in their context.            1082
+1027            • In tables, tag every cell that corresponds to
+1028              a schema field, especially cells in individual                Table 3: Agents used in the MAS pipeline.
+1029              yield, density, and input rows.
+1030            • Tag distinct years, treatments, and nitrogen          Agent               Description
+1031              levels so that records can be separated in
+1032              the next step.                                        Planner             Creates the four-step execution plan and
+1033            • Do not invent text; only wrap spans found                                 assigns each step to the corresponding
+1034              in the paper.                                                             agent.
+1035            • Preserve the table structure and separate             Value identifier    Scans the complete paper and identifies
+1036              retained blocks with a blank line.                                        values associated with fields in the
+                                                                                            extraction schema.
+1037        Input document:                                             Labeller            Uses the xml_tag_from_field_values
+1038        [PAPER CONTENT]                                                                 tool to insert field-specific XML tags
+                                                                                            around the identified values while
+1039        Return only one structured object containing                                    preserving the original document.
+1040        labeled_document.                                           Direct              Applies the direct zero-shot extraction
+                                                                        extractor           procedure to the original paper and
+1041   B.2.2 Step 2: Record Extraction                                                      produces an initial set of structured
+                                                                                            records.
+1042   The second step reused the direct zero-shot prompt               Record              Refines the initial records using the
+1043   in Appendix B.1, with the labelled output from the               extractor           XML-labelled document, filling missing
+1044   first step supplied as the paper content. The follow-                                fields and correcting values when
+                                                                                            supported by the tagged evidence.
+1045   ing instruction was added before that prompt:
+1046        The paper below includes XML tags in the form
+1047        <FieldName>verbatim         text</FieldName>,
+1048        where the tag name matches a schema field.
+1049        Use these tags as evidence, but also examine
+1050        every table row and caption in the tagged text to
+1051        maximize the number of complete records. The
+1052        absence of a tag does not necessarily mean that
+1053        the corresponding information is absent.
+
+1054     The following completeness instructions were
+1055   appended:
+1056        Output completeness:
+1057            • Produce as many records as the evidence
+1058              supports, typically one record for each dis-
+1059              tinct row in the main results tables.
+1060            • For intercropping tables, populate all avail-
+1061              able yield columns for each row rather than
+1062              combining the table into a small number of
+1063              summary records.
+1064            • Do not merge rows that differ by year, treat-
+1065              ment, or nitrogen level unless the schema
+1066              explicitly requires an aggregate record.
+
+
+                                                                   13
+

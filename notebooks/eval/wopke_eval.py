@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import re
 import sys
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -395,6 +396,7 @@ def all_papers_metrics_df(
                 "f1": _safe01(met.get("f1", float("nan"))),
             }
         )
+        rows[-1]["stacked_total"] = sum(rows[-1][k] for k in STACK_METRIC_KEYS)
     if pd is None:
         raise RuntimeError("pandas is required for all_papers_metrics_df")
     return pd.DataFrame(rows)
@@ -677,6 +679,87 @@ def eval_model(
         )
 
     return {"metrics": metrics_df, "mean": mean_df, "fields": field_df}
+
+
+def audit_unit_coverage(
+    outputs_root: Optional[Path] = None,
+    *,
+    include_gt: bool = True,
+) -> "pd.DataFrame":
+    """
+    Collect unit strings from prediction CSVs (and optionally GT) and check
+    whether ``units.Unit`` can parse them / they appear in ``UnitStorage``.
+    """
+    ensure_src_on_path()
+    from src.experimentutils.eval_utils import load_ground_truth
+    from src.experimentutils.units import Unit, UnitStorage
+
+    root = Path(outputs_root) if outputs_root else find_repo_root() / "outputs"
+    unit_cols = [
+        "N Unit",
+        "P Unit",
+        "K Unit",
+        "Yield unit",
+        "Unit.1",
+        "Unit.2",
+        "Unit.3",
+        "Unit of density",
+    ]
+    known = UnitStorage.known()
+    counter: dict[tuple[str, str, str], int] = defaultdict(int)
+
+    def _classify(unit_str: str) -> str:
+        if unit_str in known:
+            return "in_registry"
+        try:
+            Unit(unit_str)
+            return "parsable"
+        except Exception:
+            return "unparsable"
+
+    def _add(source: str, col: str, value: str) -> None:
+        v = value.strip()
+        if not v or v.lower() in {"nan", "none", "null", "n/a", "na"}:
+            return
+        counter[(source, col, v)] += 1
+
+    for run_dir in sorted(root.iterdir()):
+        if not run_dir.is_dir() or _DATED_DIR_RE.match(run_dir.name):
+            continue
+        by_paper = run_dir / "by_paper"
+        if not by_paper.is_dir():
+            continue
+        for csv_path in by_paper.glob("*.csv"):
+            if not _BY_PAPER_RE.search(csv_path.name):
+                continue
+            rows, fieldnames = read_prediction_csv(str(csv_path))
+            for row in rows:
+                for col in unit_cols:
+                    if col in fieldnames:
+                        _add("prediction", col, str(row.get(col, "")))
+
+    if include_gt:
+        gt_df = load_ground_truth()
+        for col in unit_cols:
+            if col not in gt_df.columns:
+                continue
+            for v in gt_df[col].dropna().astype(str):
+                _add("ground_truth", col, v)
+
+    rows_out: list[dict] = []
+    for (source, col, value), n in sorted(
+        counter.items(), key=lambda x: (-x[1], x[0][0], x[0][1], x[0][2])
+    ):
+        rows_out.append(
+            {
+                "source": source,
+                "column": col,
+                "unit": value,
+                "count": n,
+                "status": _classify(value),
+            }
+        )
+    return pd.DataFrame(rows_out)
 
 
 def print_paper_vs_gt(

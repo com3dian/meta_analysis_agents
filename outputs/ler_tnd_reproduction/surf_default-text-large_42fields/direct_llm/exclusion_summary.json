@@ -1,0 +1,36 @@
+{
+  "model_tag": "surf_default-text-large_42fields",
+  "method": "direct_llm",
+  "n_rows": 1010,
+  "LER_source_counts": {
+    "calculated_from_yields": 35,
+    "excluded": 563,
+    "reported": 412
+  },
+  "TND_source_counts": {
+    "excluded": 877,
+    "calculated_from_dates": 133
+  },
+  "LER_exclusion_reasons": {
+    "missing_yield_value": 516,
+    "incompatible_yield_unit": 39,
+    "missing_sole_yield_2": 8
+  },
+  "TND_exclusion_reasons": {
+    "missing_reported_tnd": 877
+  },
+  "LER_agreement_counts": {
+    "not_checkable": 993,
+    "disagree": 6,
+    "agree": 11
+  },
+  "n_unusual_ler": 1,
+  "n_regression_eligible": 100,
+  "n_matched": 70,
+  "n_analysis": 70,
+  "match_exclusion_reasons": {
+    "missing_final_ler": 563,
+    "missing_final_tnd": 347,
+    "unmatched_eligible_row": 30
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "model_tag": "surf_Qwen-Qwen3-6-35B-A3B-FP8_42fields",
+  "method": "workflow",
+  "intercept": 1.0027570715972616,
+  "tnd_coef": 1.2360953574485987,
+  "tnd_se": 0.40278653406444215,
+  "tnd_ci_low": 0.44664825722457646,
+  "tnd_ci_high": 2.025542457672621,
+  "tnd_pvalue": 0.002148774861355537,
+  "n_records": 49,
+  "n_studies": 12,
+  "n_experiments": 16,
+  "n_reported_ler": 399,
+  "n_calculated_ler": 92,
+  "n_excluded_ler": 181,
+  "n_prepared_rows": 672,
+  "engine": "statsmodels",
+  "notes": "r_unavailable:[Errno 2] No such file or directory: 'Rscript'"
+}

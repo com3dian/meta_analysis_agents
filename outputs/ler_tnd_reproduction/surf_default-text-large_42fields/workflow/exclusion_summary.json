@@ -1,0 +1,39 @@
+{
+  "model_tag": "surf_default-text-large_42fields",
+  "method": "workflow",
+  "n_rows": 1023,
+  "LER_source_counts": {
+    "reported": 442,
+    "excluded": 564,
+    "calculated_from_yields": 17
+  },
+  "TND_source_counts": {
+    "excluded": 962,
+    "calculated_from_dates": 61
+  },
+  "LER_exclusion_reasons": {
+    "incompatible_yield_unit": 26,
+    "missing_yield_value": 488,
+    "missing_intercrop_yield_2": 2,
+    "missing_yield_unit": 40,
+    "missing_sole_yield_2": 8
+  },
+  "TND_exclusion_reasons": {
+    "missing_reported_tnd": 958,
+    "tnd_out_of_range": 4
+  },
+  "LER_agreement_counts": {
+    "not_checkable": 1000,
+    "disagree": 11,
+    "agree": 12
+  },
+  "n_unusual_ler": 1,
+  "n_regression_eligible": 27,
+  "n_matched": 13,
+  "n_analysis": 13,
+  "match_exclusion_reasons": {
+    "missing_final_ler": 564,
+    "missing_final_tnd": 432,
+    "unmatched_eligible_row": 14
+  }
+}

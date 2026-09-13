@@ -1,0 +1,19 @@
+{
+  "model_tag": "surf_Sehyo-Qwen3-5-122B-A10B-NVFP4_42fields",
+  "method": "workflow",
+  "intercept": 1.1656857025945941,
+  "tnd_coef": -0.04497357437416955,
+  "tnd_se": 0.2809638824797386,
+  "tnd_ci_low": -0.5956526649910016,
+  "tnd_ci_high": 0.5057055162426624,
+  "tnd_pvalue": 0.8728268141307447,
+  "n_records": 45,
+  "n_studies": 12,
+  "n_experiments": 15,
+  "n_reported_ler": 348,
+  "n_calculated_ler": 60,
+  "n_excluded_ler": 236,
+  "n_prepared_rows": 644,
+  "engine": "statsmodels",
+  "notes": "r_unavailable:[Errno 2] No such file or directory: 'Rscript'"
+}

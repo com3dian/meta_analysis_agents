@@ -1,0 +1,19 @@
+{
+  "model_tag": "surf_default-text-large_42fields",
+  "method": "workflow",
+  "intercept": 1.2724409102725793,
+  "tnd_coef": 0.005522985994969031,
+  "tnd_se": 0.3371274390167751,
+  "tnd_ci_low": -0.6552346526781336,
+  "tnd_ci_high": 0.6662806246680717,
+  "tnd_pvalue": 0.9869292509697508,
+  "n_records": 13,
+  "n_studies": 6,
+  "n_experiments": 10,
+  "n_reported_ler": 442,
+  "n_calculated_ler": 17,
+  "n_excluded_ler": 564,
+  "n_prepared_rows": 1023,
+  "engine": "statsmodels",
+  "notes": "r_unavailable:[Errno 2] No such file or directory: 'Rscript'"
+}

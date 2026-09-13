@@ -1,0 +1,39 @@
+{
+  "model_tag": "surf_Sehyo-Qwen3-5-122B-A10B-NVFP4_42fields",
+  "method": "workflow",
+  "n_rows": 644,
+  "LER_source_counts": {
+    "reported": 348,
+    "calculated_from_yields": 60,
+    "excluded": 236
+  },
+  "TND_source_counts": {
+    "excluded": 556,
+    "calculated_from_dates": 88
+  },
+  "LER_exclusion_reasons": {
+    "incompatible_yield_unit": 22,
+    "missing_intercrop_yield_2": 20,
+    "missing_sole_yield_2": 19,
+    "missing_yield_value": 162,
+    "missing_sole_yield_1": 7,
+    "zero_sole_crop_yield": 6
+  },
+  "TND_exclusion_reasons": {
+    "missing_reported_tnd": 556
+  },
+  "LER_agreement_counts": {
+    "not_checkable": 430,
+    "agree": 131,
+    "disagree": 83
+  },
+  "n_unusual_ler": 7,
+  "n_regression_eligible": 53,
+  "n_matched": 45,
+  "n_analysis": 45,
+  "match_exclusion_reasons": {
+    "missing_final_tnd": 355,
+    "missing_final_ler": 236,
+    "unmatched_eligible_row": 8
+  }
+}

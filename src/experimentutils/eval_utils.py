@@ -5,7 +5,8 @@ and pre-processing paper text for better LLM extraction.
 Public API
 ----------
 Field-level scoring
-    field_similarity_score  – hybrid numeric / year / ROUGE-L scorer
+    field_similarity_score  – hybrid numeric / year / date / boolean / ROUGE-L scorer
+    boolean_similarity_score – Yes/No / 1/0 / true/false exact match for fodder flags
 
 Record matching & evaluation
     evaluate_record_pair_with_units – per-field scores, value+unit, crop swap
@@ -45,6 +46,12 @@ from .units import (
     ValueUnitGroup,
     WOPKE_100_GT_VALUE_UNIT_GROUPS,
     WOPKE_100_VALUE_UNIT_GROUPS,
+    canonicalize_fertilizer_unit,
+    canonicalize_yield_unit,
+    is_yield_unit_field,
+    is_yield_value_field,
+    nutrient_tag_for_unit_field,
+    nutrient_tag_for_value_field,
     unit_field_for_value,
     value_unit_groups,
 )
@@ -69,6 +76,20 @@ GT_COLUMN_ALIASES: Final[Dict[str, str]] = {
     "Data location": "Data source",
 }
 
+
+# Boolean / yes-no flags in the wopke_100 prediction schema (and GT).
+# GT uses Yes/No; model prompts allow 1/0 or true/false — normalize before scoring.
+BOOLEAN_FIELDS: Final[Tuple[str, ...]] = (
+    "Fodder crop 1",
+    "Fodder crop 2",
+)
+
+_BOOLEAN_TRUE_TOKENS: Final[frozenset[str]] = frozenset(
+    {"1", "1.0", "true", "t", "yes", "y"}
+)
+_BOOLEAN_FALSE_TOKENS: Final[frozenset[str]] = frozenset(
+    {"0", "0.0", "false", "f", "no", "n"}
+)
 
 # Fields that participate in crop-1/crop-2 swap (see find_crop_swap_pairs).
 # Includes value fields with trailing 1/2 but excludes shared unit columns.
@@ -380,6 +401,10 @@ _YEAR_RE = re.compile(r"\b(1\d{3}|20\d{2})\b")
 # thousands separators, and a single decimal point)
 _PURE_NUMBER_RE = re.compile(r"^[+-]?[\d,]+\.?\d*$")
 
+# Relative tolerance for numeric field / Quantity magnitude comparison:
+# |hyp − ref| / |ref| ≤ 2% counts as a match (score 1.0).
+NUMERIC_RELATIVE_TOLERANCE: Final[decimal.Decimal] = decimal.Decimal("0.02")
+
 # Matches a parenthetical scientific name, e.g. "(Vicia faba)" or "(Triticum aestivum L.)"
 _SCIENTIFIC_NAME_RE = re.compile(r"\s*\([A-Z][a-z]+(?:\s+[a-z]+\.?)+\)")
 _DATE_FIELD_RE = re.compile(r"\b(date|sowing|harvest)\b", re.IGNORECASE)
@@ -453,6 +478,37 @@ def _try_parse_number(v: Any) -> Optional[float]:
         except ValueError:
             return None
     return None
+
+
+def _numeric_within_relative_tolerance(
+    ref: decimal.Decimal,
+    hyp: decimal.Decimal,
+    *,
+    rel_tol: decimal.Decimal = NUMERIC_RELATIVE_TOLERANCE,
+) -> bool:
+    """Return True when ``hyp`` is within ``rel_tol`` of ``ref`` (GT).
+
+    Uses ``|hyp − ref| / |ref|``. If ``ref`` is 0, only an exact 0 matches.
+    """
+    if ref == hyp:
+        return True
+    if ref == 0:
+        return hyp == 0
+    return abs(hyp - ref) / abs(ref) <= rel_tol
+
+
+def _magnitudes_within_relative_tolerance(
+    ref: float,
+    hyp: float,
+    *,
+    rel_tol: float = float(NUMERIC_RELATIVE_TOLERANCE),
+) -> bool:
+    """Float analogue of :func:`_numeric_within_relative_tolerance`."""
+    if ref == hyp:
+        return True
+    if ref == 0.0:
+        return hyp == 0.0
+    return abs(hyp - ref) / abs(ref) <= rel_tol
 
 
 def _try_parse_decimal(v: Any) -> Optional["decimal.Decimal"]:
@@ -558,6 +614,54 @@ def _is_date_field_name(field_name: Optional[str]) -> bool:
     if not field_name:
         return False
     return bool(_DATE_FIELD_RE.search(field_name))
+
+
+def _is_boolean_field_name(field_name: Optional[str]) -> bool:
+    if not field_name:
+        return False
+    return field_name in BOOLEAN_FIELDS
+
+
+def _parse_boolean_value(v: Any) -> Optional[bool]:
+    """
+    Parse common boolean encodings used in GT and model outputs.
+
+    Accepted truthy: ``Yes``, ``Y``, ``true``, ``1``, ``1.0``, Python ``True``.
+    Accepted falsy: ``No``, ``N``, ``false``, ``0``, ``0.0``, Python ``False``.
+    Returns ``None`` when the value is missing or not recognisably boolean.
+    """
+    if isinstance(v, bool):
+        return v
+    if _is_missing(v):
+        return None
+    s = str(v).strip().lower()
+    if not s:
+        return None
+    if s in _BOOLEAN_TRUE_TOKENS:
+        return True
+    if s in _BOOLEAN_FALSE_TOKENS:
+        return False
+    return None
+
+
+def boolean_similarity_score(ref_val: Any, hyp_val: Any, *, debug: bool = False) -> float:
+    """
+    Exact boolean match after normalizing Yes/No / 1/0 / true/false.
+
+    Used for ``Fodder crop 1`` / ``Fodder crop 2`` (and any field listed in
+    ``BOOLEAN_FIELDS``). Returns ``1.0`` when both sides parse to the same
+    boolean, otherwise ``0.0``.
+    """
+    if _is_missing(ref_val) or _is_missing(hyp_val):
+        return 0.0
+
+    ref_b = _parse_boolean_value(ref_val)
+    hyp_b = _parse_boolean_value(hyp_val)
+    if debug:
+        print(f"Boolean comparison: {ref_val!r}→{ref_b} vs {hyp_val!r}→{hyp_b}")
+    if ref_b is None or hyp_b is None:
+        return 0.0
+    return 1.0 if ref_b is hyp_b else 0.0
 
 
 def _month_to_number(month_token: str) -> Optional[int]:
@@ -781,28 +885,34 @@ def field_similarity_score(
     its ground-truth counterpart.
 
     The function selects a comparison strategy automatically based on the
-    detected value type:
+    detected value type / field name:
+
+    0. **Boolean fields** – ``Fodder crop 1`` / ``Fodder crop 2`` (see
+       ``BOOLEAN_FIELDS``). Normalizes ``Yes``/``No``, ``1``/``0``,
+       ``true``/``false`` then exact-matches.
 
     1. **Missing** – either side is ``None``, ``NaN``, empty, or a null-like
        string (``"nan"``, ``"none"``, ``"null"``, ``"n/a"``).  Returns ``0.0``
        so jointly-missing fields do not receive a free perfect score.
 
-    2. **Numeric** – both sides parse as pure numbers (integers or decimals,
+    2. **Date fields** – sowing / harvest date columns use rule-based date
+       matching (see :func:`date_similarity_score`).
+
+    3. **Numeric** – both sides parse as pure numbers (integers or decimals,
        optionally with comma thousands-separators).
 
-       - Exact numeric match → ``1.0``
+       - Exact match, or relative error vs GT ≤ 2%
+         (``|hyp − ref| / |ref|``; see ``NUMERIC_RELATIVE_TOLERANCE``) → ``1.0``
        - Else, if removing the decimal point makes the strings equal
          (e.g. ``"3.124"`` ↔ ``"3124"``) → ``0.5``
        - Else → ``0.0``
 
-       No approximate / tolerance / relative-error scoring is used.
-
-    3. **Year** – both sides contain a 4-digit calendar year.  Normalises
+    4. **Year** – both sides contain a 4-digit calendar year.  Normalises
        year-range strings (``"1987-88"``, ``"1987/88"``) to their first
        4-digit year before comparing.  Returns ``1.0`` for equal years,
        ``0.0`` otherwise.
 
-    4. **Text / categorical** – ROUGE-L F1 with two pre-processing steps
+    5. **Text / categorical** – ROUGE-L F1 with two pre-processing steps
        applied before tokenisation:
 
        * **Scientific name stripping** – removes parenthetical Latin binomials
@@ -820,11 +930,21 @@ def field_similarity_score(
 
     Examples:
         >>> field_similarity_score("3.67", "3.7")
+        1.0
+        >>> field_similarity_score("100", "98")
+        1.0
+        >>> field_similarity_score("100", "97")
         0.0
         >>> field_similarity_score("3.124", "3124")
         0.5
         >>> field_similarity_score("1987-88", "1987")
         1.0
+        >>> field_similarity_score("Yes", "1", field_name="Fodder crop 1")
+        1.0
+        >>> field_similarity_score("No", "0", field_name="Fodder crop 2")
+        1.0
+        >>> field_similarity_score("Yes", "false", field_name="Fodder crop 1")
+        0.0
         >>> field_similarity_score("Bean", "bean")
         1.0
         >>> field_similarity_score("field beans (Vicia faba)", "Bean")
@@ -841,18 +961,22 @@ def field_similarity_score(
     if _is_missing(ref_val) or _is_missing(hyp_val):
         return 0.0
 
-    # ── 0. Date-field comparison (single routing point for pair evaluation) ──
+    # ── 0. Boolean-field comparison (before numeric: "1"/"0" are bool flags) ─
+    if _is_boolean_field_name(field_name):
+        return boolean_similarity_score(ref_val, hyp_val, debug=debug)
+
+    # ── 1. Date-field comparison (single routing point for pair evaluation) ──
     if _is_date_field_name(field_name):
         return date_similarity_score(ref_val, hyp_val, debug=debug)
 
-    # ── 1. Numeric comparison ────────────────────────────────────────────────
+    # ── 2. Numeric comparison ────────────────────────────────────────────────
     ref_dec = _try_parse_decimal(ref_val)
     hyp_dec = _try_parse_decimal(hyp_val)
     if ref_dec is not None and hyp_dec is not None:
         if debug:
             print(f"Numeric comparison: {ref_dec} vs {hyp_dec}")
-        # Exact numeric equality first (e.g. "3" == "3.0" == 3)
-        if ref_dec == hyp_dec:
+        # Exact equality or within 2% of GT (e.g. "3" == "3.0", "100" ~ "98")
+        if _numeric_within_relative_tolerance(ref_dec, hyp_dec):
             return 1.0
         # Second-chance: match by removing the decimal point (e.g. 3.124 ~ 3124)
         ref_no_dot = _remove_decimal_point_numeric_string(ref_val)
@@ -861,7 +985,7 @@ def field_similarity_score(
             return 0.5
         return 0.0
 
-    # ── 2. Excel-serial-style date comparison ───────────────────────────────
+    # ── 3. Excel-serial-style date comparison ───────────────────────────────
     # If one or both values look like Excel serial days and can be converted
     # to calendar dates, compare their ISO strings for exact match.
     ref_excel = _excel_serial_to_iso(ref_val)
@@ -884,7 +1008,7 @@ def field_similarity_score(
         if ref_iso is not None and hyp_iso is not None:
             return 1.0 if ref_iso == hyp_iso else 0.0
 
-    # ── 3. Year comparison ───────────────────────────────────────────────────
+    # ── 4. Year comparison ───────────────────────────────────────────────────
     ref_year = _extract_year(ref_val)
     hyp_year = _extract_year(hyp_val)
     if ref_year is not None and hyp_year is not None:
@@ -892,7 +1016,7 @@ def field_similarity_score(
             print(f"Year comparison: {ref_year} vs {hyp_year}")
         return 1.0 if ref_year == hyp_year else 0.0
 
-    # ── 4. Text / categorical comparison ────────────────────────────────────
+    # ── 5. Text / categorical comparison ────────────────────────────────────
     # Strip scientific names then tokenise; use prefix matching in LCS so
     # that "beans"/"bean", "wheats"/"wheat" etc. are treated as equivalent.
     return rouge_l_soft_score(ref_val, hyp_val)
@@ -1291,12 +1415,23 @@ def _gt_unit_field_for_value(
     return pred_unit or gt_unit
 
 
-def _try_build_quantity(value: Any, unit_symbol: Any) -> Optional[Quantity]:
+def _try_build_quantity(
+    value: Any,
+    unit_symbol: Any,
+    *,
+    nutrient: Optional[str] = None,
+    yield_unit: bool = False,
+    yield_gt: bool = False,
+) -> Optional[Quantity]:
     mag = _try_parse_magnitude(value)
     if mag is None or _is_missing(unit_symbol):
         return None
+    if yield_unit:
+        unit_text = canonicalize_yield_unit(unit_symbol, for_gt=yield_gt)
+    else:
+        unit_text = canonicalize_fertilizer_unit(unit_symbol, nutrient=nutrient)
     try:
-        return Quantity(mag, Unit(str(unit_symbol).strip()))
+        return Quantity(mag, Unit(unit_text))
     except (ValueError, TypeError, ZeroDivisionError):
         return None
 
@@ -1304,20 +1439,35 @@ def _try_build_quantity(value: Any, unit_symbol: Any) -> Optional[Quantity]:
 def unit_field_similarity_score(
     ref_unit: Any,
     hyp_unit: Any,
+    *,
+    nutrient: Optional[str] = None,
+    yield_context: bool = False,
 ) -> float:
     """
     Similarity for a standalone unit column (e.g. ``N Unit`` vs ``kg N/ha``).
 
     Returns ``1.0`` when both parse as compatible :class:`~units.Unit` with the
-    same scale; otherwise falls back to :func:`field_similarity_score`.
+    same scale; for N/P/K fertilizer units, compatible dimensions also count as
+    a match (e.g. ``g N m-2`` vs GT ``kg/ha`` interpreted as ``kg N/ha``).
+    For yield units, compatible mass-per-area units also count as a match
+    (e.g. ``g DM m-2`` vs GT mislabeled ``g/m2`` / ``kg/ha`` / ``q/ha`` / ``kg/m2``,
+    all interpreted as ``t/ha`` for ``unified yield *`` values).
+    Otherwise falls back to :func:`field_similarity_score`.
     """
     if _is_missing(ref_unit) or _is_missing(hyp_unit):
         return 0.0
     try:
-        u_ref = Unit(str(ref_unit).strip())
-        u_hyp = Unit(str(hyp_unit).strip())
-        if u_ref.is_compatible(u_hyp) and abs(u_ref.conversion_factor_to(u_hyp) - 1.0) < 1e-9:
-            return 1.0
+        if yield_context:
+            u_ref = Unit(canonicalize_yield_unit(ref_unit, for_gt=True))
+            u_hyp = Unit(canonicalize_yield_unit(hyp_unit, for_gt=False))
+        else:
+            u_ref = Unit(canonicalize_fertilizer_unit(ref_unit, nutrient=nutrient))
+            u_hyp = Unit(canonicalize_fertilizer_unit(hyp_unit, nutrient=nutrient))
+        if u_ref.is_compatible(u_hyp):
+            if nutrient is not None or yield_context:
+                return 1.0
+            if abs(u_ref.conversion_factor_to(u_hyp) - 1.0) < 1e-9:
+                return 1.0
     except ValueError:
         pass
     return field_similarity_score(ref_unit, hyp_unit)
@@ -1334,8 +1484,9 @@ def value_with_unit_similarity_score(
     Score one numeric value field using its paired unit column on each row.
 
     Builds :class:`~units.Quantity` for prediction and ground truth; returns
-    ``1.0`` if they are equal after unit conversion. Falls back to value-only
-    :func:`field_similarity_score` when either unit is missing.
+    ``1.0`` if magnitudes match after unit conversion within 2% relative
+    error vs GT. Falls back to value-only :func:`field_similarity_score`
+    when either unit is missing.
     """
     pred_unit_field = unit_field_for_value(value_field)
     gt_unit_field = _gt_unit_field_for_value(
@@ -1350,11 +1501,37 @@ def value_with_unit_similarity_score(
     pred_unit_val = _row_get(pred_row, pred_unit_field) if pred_unit_field else None
     gt_unit_val = _row_get(gt_row, gt_unit_field) if gt_unit_field else None
 
-    q_pred = _try_build_quantity(pred_val, pred_unit_val)
-    q_gt = _try_build_quantity(gt_val, gt_unit_val)
+    nutrient = nutrient_tag_for_value_field(value_field)
+    if nutrient is None and gt_unit_field:
+        nutrient = nutrient_tag_for_unit_field(gt_unit_field)
+    if nutrient is None and pred_unit_field:
+        nutrient = nutrient_tag_for_unit_field(pred_unit_field)
+
+    is_yield = is_yield_value_field(value_field)
+    q_pred = _try_build_quantity(
+        pred_val,
+        pred_unit_val,
+        nutrient=nutrient,
+        yield_unit=is_yield,
+        yield_gt=False,
+    )
+    q_gt = _try_build_quantity(
+        gt_val,
+        gt_unit_val,
+        nutrient=nutrient,
+        yield_unit=is_yield,
+        yield_gt=True,
+    )
 
     if q_pred is not None and q_gt is not None:
-        return 1.0 if q_pred == q_gt else 0.0
+        if not q_pred.unit.is_compatible(q_gt.unit):
+            return 0.0
+        hyp_mag = q_pred.to(q_gt.unit).magnitude
+        return (
+            1.0
+            if _magnitudes_within_relative_tolerance(q_gt.magnitude, hyp_mag)
+            else 0.0
+        )
 
     if _is_missing(pred_unit_val) or _is_missing(gt_unit_val):
         return field_similarity_score(gt_val, pred_val, field_name=value_field)
@@ -1416,6 +1593,8 @@ def score_field_between_records(
         return unit_field_similarity_score(
             _row_get(gt_row, field_name),
             _row_get(pred_row, field_name),
+            nutrient=nutrient_tag_for_unit_field(field_name),
+            yield_context=is_yield_unit_field(field_name),
         )
     return field_similarity_score(
         _row_get(gt_row, field_name),
@@ -2177,6 +2356,8 @@ __all__ = [
     "WOPKE_100_GT_VALUE_UNIT_GROUPS",
     "VALUE_TO_UNIT_FIELD",
     "UNIT_FIELDS",
+    "BOOLEAN_FIELDS",
+    "NUMERIC_RELATIVE_TOLERANCE",
     "SWAP_ELIGIBLE_SUFFIX_FIELDS",
     "GT_COLUMN_ALIASES",
     "value_unit_groups",
@@ -2190,6 +2371,7 @@ __all__ = [
     "highlight_numbers_and_tables",
     "build_extraction_context",
     "rouge_l_soft_score",
+    "boolean_similarity_score",
     "date_similarity_score",
     "field_similarity_score",
     "find_crop_swap_pairs",
