@@ -1,6 +1,7 @@
 <div align="center">
+<img width="332" height="250" alt="image" src="https://github.com/user-attachments/assets/8dec4a37-8810-409f-8bc4-cca50d28e647" />
 
-# Generative AI for Meta-Analysis Data Extraction
+# Can GenAI Automate Data Extraction from Scientific Literature? A Case Study in Agriculture
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 [![arXiv](https://img.shields.io/badge/arXiv-2609.35089-b31b1b)](https://arxiv.org/abs/2609.35089)
