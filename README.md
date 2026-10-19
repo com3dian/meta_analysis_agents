@@ -3,12 +3,16 @@
 # Generative AI for Meta-Analysis Data Extraction
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+[![arXiv](https://img.shields.io/badge/arXiv-2609.35089-b31b1b)](https://arxiv.org/abs/2609.35089)
+[![WASP 2026](https://img.shields.io/badge/WASP-2026-0A7B5A)](https://ui.adsabs.harvard.edu/WIESP/2026/)
 
 </div>
 
 ## Description
 
-This repository contains the code used to evaluate generative-AI approaches for extracting structured data from intercropping research papers. It compares direct zero-shot prompting, a staged workflow, and a multi-agent system against manually curated ground truth and evaluates their effects on a downstream meta-analysis.
+This repository contains the code for [Can Generative AI Automate Data Extraction for Meta-Analysis? A Case Study on Intercropping Research](https://arxiv.org/abs/2609.35089), accepted at the 4th Workshop on Artificial Intelligence for Scientific Publications ([WASP 2026](https://ui.adsabs.harvard.edu/WIESP/2026/)), co-located with IJCNLP-AACL 2026.
+
+It compares direct zero-shot prompting, a staged workflow, and a multi-agent system against manually curated ground truth and evaluates their effects on a downstream meta-analysis.
 
 ## Installation
 
@@ -47,18 +51,35 @@ Provider and model settings are configured in `.env`; the supported options are 
 ```text
 .
 ├── docs/                   # Architecture and usage notes
+├── figures/                # Paper figures
 ├── notebooks/
 │   ├── experiment/         # Extraction experiments
-│   └── eval/               # Evaluation and downstream analysis
+│   └── eval/               # Evaluation and TND–LER reproduction
 ├── src/
 │   ├── direct_llm_call/    # Direct zero-shot extraction
 │   ├── static_workflow/    # Staged extraction workflow
 │   ├── orchestrator/       # Multi-agent orchestration
+│   ├── players/            # Agent roles and configs
+│   ├── tools/              # Agent tools
+│   ├── context/            # Document context
+│   ├── core/               # Shared schemas and state
 │   └── experimentutils/    # Evaluation and reproduction utilities
+├── data/                   # Papers and ground truth (not in git)
+├── outputs/                # Extraction and evaluation outputs
 ├── .env.example            # LLM provider configuration template
 └── requirements.txt        # Python dependencies
 ```
 
 ## Citation
 
-Citation information will be added after publication.
+```bibtex
+@misc{lu2026generativeaiautomatedata,
+      title={Can Generative AI Automate Data Extraction for Meta-Analysis? A Case Study on Intercropping Research}, 
+      author={Zehao Lu and Xingguo Xiong and Wopke van der Werf and Thijs L. van der Plas and Ioannis N. Athanasiadis},
+      year={2026},
+      eprint={2609.35089},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2609.35089}, 
+}
+```
