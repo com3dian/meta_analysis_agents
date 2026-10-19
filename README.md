@@ -15,7 +15,7 @@ This repository contains the code used to evaluate generative-AI approaches for 
 Clone the repository and create a Python environment:
 
 ```bash
-git clone [<repository-url>](https://github.com/com3dian/meta_analysis_agents)
+git clone https://github.com/com3dian/meta_analysis_agents
 cd meta_analysis_agents
 python -m venv .venv
 source .venv/bin/activate
